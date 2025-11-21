@@ -76,30 +76,11 @@ def generate_dates() -> List[str]:
 
     current = end_date
     while current >= start_date:
-        if current.day in TARGET_DAYS and current <= end_date:
+        if current.day in TARGET_DAYS:
             dates.append(current.strftime("%Y-%m-%d"))
-
-        # Move to next target day
-        target_days_sorted = sorted(TARGET_DAYS, reverse=True)
-        current_idx = None
-        for idx, day in enumerate(target_days_sorted):
-            if current.day == day:
-                current_idx = idx
-                break
-
-        if current_idx is not None and current_idx < len(target_days_sorted) - 1:
-            # Move to next target day in current month
-            current = current.replace(day=target_days_sorted[current_idx + 1])
-        else:
-            # Move to previous month, largest target day
-            if current.month == 1:
-                current = current.replace(
-                    year=current.year - 1, month=12, day=target_days_sorted[0]
-                )
-            else:
-                current = current.replace(
-                    month=current.month - 1, day=target_days_sorted[0]
-                )
+        
+        # Move to previous day
+        current = current - timedelta(days=1)
 
     return dates
 
