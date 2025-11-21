@@ -21,6 +21,8 @@ STATE_FILE = "crawler_state.json"
 LOG_FILE = "tweet_crawler.log"
 DATA_DIR = "tweet_data"
 TEST_OUTPUT_FILE = "test.jsonl"
+PARQUET_OUTPUT_DIR = "parquet_data"
+SENTIMENT_OUTPUT_DIR = "sentiment_results"
 
 # Keywords to search for
 KEYWORDS = [
@@ -63,7 +65,7 @@ KEYWORDS = [
 
 # Date range configuration
 START_DATE = "2024-03-01"  # Format: YYYY-MM-DD
-END_DATE = "2025-03-20"    # Format: YYYY-MM-DD
+END_DATE = "2025-03-20"  # Format: YYYY-MM-DD
 TARGET_DAYS = [1, 10, 20]  # Days of the month to crawl
 
 # Search configuration
@@ -72,3 +74,8 @@ QUERY_TYPE = "Latest"  # "Latest" or "Top"
 
 # Rate limiting
 REQUEST_DELAY = 0.5  # Seconds to wait between API requests
+
+# OpenAI Configuration (for sentiment analysis)
+OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"  # Replace with your OpenAI API key
+OPENAI_MODEL = "gpt-4.1"  # Model to use for sentiment analysis
+SENTIMENT_SAMPLE_SIZE = 1000  # Number of tweets to sample for sentiment analysis
