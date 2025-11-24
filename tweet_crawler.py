@@ -78,14 +78,19 @@ def generate_dates() -> List[str]:
     while current >= start_date:
         if current.day in TARGET_DAYS:
             dates.append(current.strftime("%Y-%m-%d"))
-        
+
         # Move to previous day
         current = current - timedelta(days=1)
 
     return dates
 
 
-def build_query(keywords: List[str], date: str, language: str = LANGUAGE) -> str:
+def build_query(
+    keywords: List[str],
+    date: str,
+    language: str = LANGUAGE,
+    max_id: Optional[str] = None,
+) -> str:
     """
     Build the query string for Twitter API.
 
@@ -93,6 +98,7 @@ def build_query(keywords: List[str], date: str, language: str = LANGUAGE) -> str
         keywords: List of keywords to search for
         date: Date in YYYY-MM-DD format
         language: Language code (default: en)
+        max_id: Optional max_id to continue pagination beyond initial limit
 
     Returns:
         Query string formatted for Twitter API
@@ -106,6 +112,10 @@ def build_query(keywords: List[str], date: str, language: str = LANGUAGE) -> str
 
     # Add date and language filters
     query = f"({keyword_query}) lang:{language} since:{since_date} until:{until_date}"
+
+    # Add max_id if provided
+    if max_id:
+        query = f"{query} max_id:{max_id}"
 
     return query
 
@@ -134,6 +144,7 @@ def crawl_tweets_for_date(
     output_file: Optional[Path] = None,
     state: Optional[Dict[str, Any]] = None,
     total_written: int = 0,
+    start_max_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Crawl tweets for a specific date.
@@ -147,25 +158,28 @@ def crawl_tweets_for_date(
         output_file: If provided, append tweets to this file as JSONL per response
         state: Optional shared state dict to update/save per response
         total_written: Starting count of tweets already written for this date
+        start_max_id: Optional max_id to resume from (for pagination beyond initial limit)
 
     Returns:
         Dictionary with crawl results
     """
-    query = build_query(KEYWORDS, date)
+    base_query = build_query(KEYWORDS, date)
     headers = {"X-API-Key": API_KEY}
-
-    params = {"queryType": QUERY_TYPE, "query": query}
 
     all_tweets = []
     cursor = start_cursor or ""
+    max_id = start_max_id
     calls_made = start_calls
     max_calls = 1 if test_mode else (max_calls or CALLS_PER_DATE)
     completed = False
+    # If we have a start_max_id, we're resuming from max_id pagination
+    # Otherwise, we start with cursor pagination and switch to max_id when has_next_page becomes False
+    using_max_id = False
 
     if calls_made >= max_calls:
         return {
             "date": date,
-            "total_tweets": 0,
+            "total_tweets": total_written,
             "calls_made": calls_made,
             "last_cursor": cursor,
             "tweets": all_tweets,
@@ -173,7 +187,7 @@ def crawl_tweets_for_date(
         }
 
     logger.info(
-        f"Starting crawl for {date} (max_calls: {max_calls}, resume_calls: {calls_made})"
+        f"Starting crawl for {date} (max_calls: {max_calls}, resume_calls: {calls_made}, max_id: {max_id})"
     )
 
     with tqdm(
@@ -181,8 +195,16 @@ def crawl_tweets_for_date(
     ) as pbar:
         while calls_made < max_calls:
             try:
-                # Add cursor to params if not empty
-                if cursor:
+                # Build query with max_id if using max_id pagination
+                if using_max_id and max_id:
+                    query = build_query(KEYWORDS, date, max_id=max_id)
+                else:
+                    query = base_query
+
+                params = {"queryType": QUERY_TYPE, "query": query}
+
+                # Add cursor to params if not empty and not using max_id
+                if not using_max_id and cursor:
                     params["cursor"] = cursor
                 elif "cursor" in params:
                     del params["cursor"]
@@ -242,19 +264,41 @@ def crawl_tweets_for_date(
                 all_tweets.extend(tweets)
 
                 logger.info(
-                    f"Call {calls_made}/{max_calls}: Retrieved {len(tweets)} tweets (total: {len(all_tweets)})"
+                    f"Call {calls_made}/{max_calls}: Retrieved {len(tweets)} tweets (total: {total_written})"
                 )
 
                 # Check if there are more pages
                 has_next_page = data.get("has_next_page", False)
                 next_cursor = data.get("next_cursor", "")
 
-                if has_next_page and next_cursor:
-                    cursor = next_cursor
-                else:
-                    completed = True
+                # Update max_id from the last tweet if we have tweets
+                if tweets:
+                    last_tweet_id = tweets[-1].get("id")
+                    if last_tweet_id:
+                        max_id = last_tweet_id
 
-                finished_now = completed or calls_made >= max_calls
+                # Determine if we should continue
+                # If no tweets returned, we're truly done
+                if not tweets:
+                    completed = True
+                    logger.info(f"No more tweets available for {date} (empty response)")
+                elif has_next_page and next_cursor:
+                    # Continue with cursor pagination
+                    cursor = next_cursor
+                    using_max_id = False
+                else:
+                    # Switch to max_id pagination if we have tweets
+                    if max_id:
+                        using_max_id = True
+                        cursor = None  # Clear cursor when switching to max_id
+                        logger.info(
+                            f"Switching to max_id pagination for {date} (max_id: {max_id})"
+                        )
+                    else:
+                        completed = True
+                        logger.info(f"No more pages available for {date}")
+
+                finished_now = completed or (calls_made >= max_calls)
 
                 if output_file:
                     append_tweets(output_file, tweets)
@@ -267,11 +311,11 @@ def crawl_tweets_for_date(
                         "total_tweets": total_written,
                         "calls_made": calls_made,
                         "current_cursor": cursor,
+                        "max_id": max_id,
                     }
                     save_state(state)
 
                 if completed:
-                    logger.info(f"No more pages available for {date}")
                     break
 
                 # Small delay to avoid rate limiting
@@ -289,9 +333,10 @@ def crawl_tweets_for_date(
 
     return {
         "date": date,
-        "total_tweets": len(all_tweets),
+        "total_tweets": total_written,
         "calls_made": calls_made,
         "last_cursor": cursor,
+        "max_id": max_id,
         "tweets": all_tweets,
         "finished": completed or calls_made >= max_calls,
         "total_written": total_written,
@@ -371,11 +416,14 @@ def crawl():
                 logger.info(f"Skipping {date} (already completed)")
                 continue
 
-            # Get resume cursor if exists
+            # Get resume cursor and max_id if exists
             resume_cursor = state.get(date, {}).get("current_cursor", "")
             resume_calls = state.get(date, {}).get("calls_made", 0)
+            resume_max_id = state.get(date, {}).get("max_id")
 
-            logger.info(f"Starting crawl for {date} (resume from call {resume_calls})")
+            logger.info(
+                f"Starting crawl for {date} (resume from call {resume_calls}, max_id: {resume_max_id})"
+            )
 
             # Crawl tweets for this date
             output_file = data_dir / f"tweets_{date}.jsonl"
@@ -388,15 +436,20 @@ def crawl():
                 output_file=output_file,
                 state=state,
                 total_written=total_written,
+                start_max_id=resume_max_id,
             )
 
             # Ensure state is saved even if no batches were processed
-            if date not in state or state[date].get("calls_made") != result["calls_made"]:
+            if (
+                date not in state
+                or state[date].get("calls_made") != result["calls_made"]
+            ):
                 state[date] = {
                     "finished": result["finished"],
                     "total_tweets": result["total_written"],
                     "calls_made": result["calls_made"],
                     "current_cursor": result["last_cursor"],
+                    "max_id": result.get("max_id"),
                 }
                 save_state(state)
 
