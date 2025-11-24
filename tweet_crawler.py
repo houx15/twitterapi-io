@@ -45,6 +45,7 @@ from config import (
 # Retry configuration
 MAX_RETRIES = 3
 RETRY_DELAY = 2
+REQUEST_TIMEOUT = 30
 
 # Setup logging
 logging.basicConfig(
@@ -166,15 +167,14 @@ def crawl_tweets_for_date(
     base_query = build_query(KEYWORDS, date)
     headers = {"X-API-Key": API_KEY}
 
-    all_tweets = []
     cursor = start_cursor or ""
     max_id = start_max_id
+    previous_max_id = None
+    previous_cursor = None
     calls_made = start_calls
     max_calls = 1 if test_mode else (max_calls or CALLS_PER_DATE)
     completed = False
-    # If we have a start_max_id, we're resuming from max_id pagination
-    # Otherwise, we start with cursor pagination and switch to max_id when has_next_page becomes False
-    using_max_id = False
+    last_batch: List[Dict[str, Any]] = []
 
     if calls_made >= max_calls:
         return {
@@ -182,7 +182,7 @@ def crawl_tweets_for_date(
             "total_tweets": total_written,
             "calls_made": calls_made,
             "last_cursor": cursor,
-            "tweets": all_tweets,
+            "tweets": last_batch,
             "finished": True,
         }
 
@@ -195,26 +195,26 @@ def crawl_tweets_for_date(
     ) as pbar:
         while calls_made < max_calls:
             try:
-                # Build query with max_id if using max_id pagination
-                if using_max_id and max_id:
-                    query = build_query(KEYWORDS, date, max_id=max_id)
-                else:
-                    query = base_query
+                query = base_query
 
                 params = {"queryType": QUERY_TYPE, "query": query}
 
-                # Add cursor to params if not empty and not using max_id
-                if not using_max_id and cursor:
+                if cursor:
                     params["cursor"] = cursor
-                elif "cursor" in params:
-                    del params["cursor"]
+                elif max_id:
+                    params["query"] = f"{query} max_id:{max_id}"
 
                 # Make API request
                 attempt = 0
                 data = None
                 while attempt < MAX_RETRIES:
                     try:
-                        response = requests.get(API_URL, headers=headers, params=params)
+                        response = requests.get(
+                            API_URL,
+                            headers=headers,
+                            params=params,
+                            timeout=REQUEST_TIMEOUT,
+                        )
                         response.raise_for_status()
                         data = response.json()
                         break
@@ -261,7 +261,7 @@ def crawl_tweets_for_date(
 
                 # Extract tweets
                 tweets = data.get("tweets", [])
-                all_tweets.extend(tweets)
+                last_batch = tweets
 
                 logger.info(
                     f"Call {calls_made}/{max_calls}: Retrieved {len(tweets)} tweets (total: {total_written})"
@@ -269,13 +269,12 @@ def crawl_tweets_for_date(
 
                 # Check if there are more pages
                 has_next_page = data.get("has_next_page", False)
-                next_cursor = data.get("next_cursor", "")
+                next_cursor = data.get("next_cursor")
 
                 # Update max_id from the last tweet if we have tweets
                 if tweets:
                     last_tweet_id = tweets[-1].get("id")
-                    if last_tweet_id:
-                        max_id = last_tweet_id
+                    max_id = last_tweet_id
 
                 # Determine if we should continue
                 # If no tweets returned, we're truly done
@@ -284,19 +283,30 @@ def crawl_tweets_for_date(
                     logger.info(f"No more tweets available for {date} (empty response)")
                 elif has_next_page and next_cursor:
                     # Continue with cursor pagination
-                    cursor = next_cursor
-                    using_max_id = False
-                else:
-                    # Switch to max_id pagination if we have tweets
-                    if max_id:
-                        using_max_id = True
-                        cursor = None  # Clear cursor when switching to max_id
-                        logger.info(
-                            f"Switching to max_id pagination for {date} (max_id: {max_id})"
+                    if next_cursor == cursor:
+                        logger.warning(
+                            f"Cursor did not advance for {date}; stopping to avoid loop"
                         )
+                        cursor = None
                     else:
-                        completed = True
-                        logger.info(f"No more pages available for {date}")
+                        cursor = next_cursor
+                else:
+                    cursor = None  # Clear cursor when switching to max_id
+                    logger.info(
+                        f"Switching to max_id pagination for {date} (max_id: {max_id})"
+                    )
+
+                # Break if max_id is not progressing to avoid infinite loops
+                if max_id == previous_max_id:
+                    logger.warning(
+                        f"max_id did not advance for {date} (max_id: {max_id}); stopping to avoid loop"
+                    )
+                    completed = True
+                if not max_id and not cursor:
+                    completed = True
+                    logger.info(f"No more tweets available for {date} (empty response)")
+
+                previous_max_id = max_id
 
                 finished_now = completed or (calls_made >= max_calls)
 
@@ -337,7 +347,7 @@ def crawl_tweets_for_date(
         "calls_made": calls_made,
         "last_cursor": cursor,
         "max_id": max_id,
-        "tweets": all_tweets,
+        "tweets": last_batch,
         "finished": completed or calls_made >= max_calls,
         "total_written": total_written,
     }
