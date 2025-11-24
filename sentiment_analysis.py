@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import pandas as pd
-import pyarrow.parquet as pq
 from tqdm import tqdm
 from openai import OpenAI
 import fire
