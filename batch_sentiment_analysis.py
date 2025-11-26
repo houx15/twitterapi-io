@@ -406,6 +406,8 @@ def submit_batch(
     save_processed_ids(processed_ids)
     if created_batches:
         logger.info(f"Created batches: {created_batches}")
+    
+    batcher_manager.save()
 
     target_batches = batch_manager.get_batches_by_mode(content)
 
@@ -435,6 +437,8 @@ def submit_batch(
             except Exception as e:
                 logger.error(f"Failed to upload file for batch {batch_index}: {e}")
                 pass
+    
+    batch_manager.save()
 
     # Step 3: create batches for entries with a file_id but no batch_id
     for batch_info in target_batches:
@@ -446,6 +450,9 @@ def submit_batch(
             try:
                 batch = client.batches.create(
                     input_file_id=file_id,
+                    endpoint="/v1/responses",
+                    completion_window="24h",
+
                 )
                 batch_id = batch.id
                 logger.info(f"Batch {batch_index} submitted with ID: {batch_id}")
