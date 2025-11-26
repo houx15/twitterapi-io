@@ -73,7 +73,6 @@ def save_processed_id(new_id: str):
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(CACHE_FILE, "a") as f:
         f.write(new_id + "\n")
-    logger.info(f"Saved {new_id} to cache")
 
 
 def load_parquet_files_filtered_by_date(
@@ -167,6 +166,8 @@ def sample_tweets(
         )
         return df
 
+    # 不能重复
+    df = df.drop_duplicates(subset=["id"])
     sampled = df.sample(n=sample_size, random_state=seed)
     logger.info(f"Sampled {len(sampled)} tweets from {len(df)} total")
 
@@ -184,18 +185,23 @@ def create_batch_request(tweet_id: str, tweet_text: str) -> Dict[str, Any]:
     Returns:
         Batch request dictionary
     """
+    timestamp = str(int(time.time()))
     return {
-        "custom_id": str(tweet_id),
+        "custom_id": f"{timestamp}-{tweet_id}",
         "method": "POST",
         "url": "/v1/responses",
         "body": {
             "model": BATCH_MODEL,
             "reasoning": {"effort": "medium"},
-            "prompt": {
-                "id": BATCH_PROMPT_ID,
-                "version": BATCH_PROMPT_VERSION,
-                "variables": {"text": tweet_text},
+            "response_format": {
+                "type": "json_object",
             },
+            "input": {
+                "messages": [
+                    {"role": "system", "content": [{"type": "prompt", "id": BATCH_PROMPT_ID}]},
+                    {"role": "user", "content": f"Tweet text: {tweet_text}"}
+                ]
+            }
         },
     }
 
@@ -352,7 +358,6 @@ def submit_batch(
             tweet_text = row.get("text", "") or ""
             if tweet_id and tweet_text:
                 requests.append(create_batch_request(str(tweet_id), tweet_text))
-                processed_ids.add(str(tweet_id))
                 save_processed_id(str(tweet_id))
         return requests
 
@@ -401,7 +406,7 @@ def submit_batch(
     if created_batches:
         logger.info(f"Created batches: {created_batches}")
     
-    batcher_manager.save()
+    batch_manager.save()
 
     target_batches = batch_manager.get_batches_by_mode(content)
 
@@ -605,7 +610,6 @@ def analyze_batch_results(content: str = "sample"):
         "reasoning_tokens": 0,
         "total_tokens": 0,
     }
-    processed_ids = load_processed_ids()
 
     for batch_info in tqdm(batches_to_process, desc="Analyzing batches"):
         batch_index = batch_info.get("index")
@@ -674,13 +678,8 @@ def analyze_batch_results(content: str = "sample"):
 
                     # Track processed ID (even if failed)
                     custom_id = result.get("custom_id")
-                    if custom_id:
-                        processed_ids.add(str(custom_id))
         except Exception as e:
             logger.warning(f"Failed to read results file for batch {batch_index}: {e}")
-
-    # Save processed IDs
-    save_processed_ids(processed_ids)
 
     # Parse opinions
     opinions = []
@@ -717,7 +716,7 @@ def analyze_batch_results(content: str = "sample"):
 
         opinions.append(
             {
-                "id": custom_id,
+                "id": custom_id.split("-")[1],
                 "opinion": opinion,
                 "error": error_message if error_message else None,
             }
