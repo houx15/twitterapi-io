@@ -19,6 +19,7 @@ import json
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from datetime import datetime, date
 import pandas as pd
 from tqdm import tqdm
 import fire
@@ -127,13 +128,14 @@ def read_jsonl_file(file_path: Path) -> List[Dict[str, Any]]:
     return tweets
 
 
-def convert_to_parquet(tweets: List[Dict[str, Any]], output_file: Path) -> int:
+def convert_to_parquet(tweets: List[Dict[str, Any]], output_file: Path, target_date: Optional[date] = None) -> int:
     """
     Convert tweets to Parquet format.
 
     Args:
         tweets: List of raw tweet dictionaries
         output_file: Path to output Parquet file
+        target_date: Target date to filter tweets (extracted from filename)
 
     Returns:
         Number of tweets written
@@ -146,9 +148,28 @@ def convert_to_parquet(tweets: List[Dict[str, Any]], output_file: Path) -> int:
     extracted = [extract_tweet_data(tweet) for tweet in tweets]
 
     df = pd.DataFrame(extracted)
+    
+    initial_count = len(df)
+    
+    # Filter tweets by target date from filename
+
+    def parse_created_at(created_at_str: str) -> date:
+        try:
+            return datetime.strptime(created_at_str, "%a %b %d %H:%M:%S +0000 %Y").date()
+        except ValueError:
+            return None
+    
+    df["_parsed_date"] = df["createdAt"].apply(parse_created_at)
+    df = df[df["_parsed_date"] == target_date].copy()
+    df = df.drop(columns=["_parsed_date"])
+    
+    # Drop duplicate tweet IDs within the same day
+    df = df.drop_duplicates(subset=["id"], keep="first")
+    logger.info(f"Removed {len(df) - initial_count}  tweet IDs")
+    
     df.to_parquet(output_file, engine="fastparquet", compression="snappy", index=False)
 
-    return len(extracted)
+    return len(df)
 
 
 def convert_file(
@@ -172,11 +193,17 @@ def convert_file(
         logger.warning(f"No tweets found in {input_file}")
         return 0
 
+    # Extract date from filename (e.g., "tweets_2025-03-31.jsonl" -> "2025-03-31")
+    target_date = None
+    filename = input_file.stem  # Get filename without extension
+    date_str = filename.split("_")[-1]  # Get last part after underscore
+    target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    logger.info(f"Extracted target date from filename: {target_date}")
     # Create output filename
     output_file = output_dir / input_file.name.replace(".jsonl", ".parquet")
 
     # Convert to Parquet
-    count = convert_to_parquet(tweets, output_file)
+    count = convert_to_parquet(tweets, output_file, target_date)
 
     logger.info(f"Converted {count} tweets: {input_file.name} -> {output_file.name}")
 

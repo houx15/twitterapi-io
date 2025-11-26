@@ -213,12 +213,15 @@ def crawl_tweets_for_date(
 
                 if cursor:
                     params["cursor"] = cursor
-                elif max_id and max_id_retry_count == 0:
-                    query = build_query(KEYWORDS, date, max_id=max_id)
+                elif max_id:
+                    if max_id_retry_count >= 2:
+                        query = build_query(KEYWORDS, date, max_id=str(int(max_id) - (1000 * max_id_retry_count)))
+                    else:
+                        query = build_query(KEYWORDS, date, max_id=max_id)
                     params["query"] = query
-                elif max_id and max_id_retry_count > 0:
-                    query = build_query(KEYWORDS, date, until_time_str=until_time_str)
-                    params["query"] = query
+                # elif max_id and max_id_retry_count > 0:
+                #     query = build_query(KEYWORDS, date, until_time_str=until_time_str)
+                #     params["query"] = query
 
                 # Make API request
                 attempt = 0
@@ -313,50 +316,19 @@ def crawl_tweets_for_date(
                         else:
                             logger.warning(f"Wrong data for {date} (created_at: {created_at_date}, last_tweet_id: {last_tweet_id}, max_id: {max_id})")
                             next_cursor = None
-                # Determine if we should continue
-                # If no tweets returned, we're truly done
-                if not tweets:
-                    completed = True
-                    logger.info(f"No more tweets available for {date} (empty response)")
-                elif has_next_page and next_cursor:
-                    # Continue with cursor pagination
-                    if next_cursor == cursor:
-                        logger.warning(
-                            f"Cursor did not advance for {date}; stopping to avoid loop"
-                        )
-                        cursor = None
-                    else:
-                        cursor = next_cursor
-                else:
-                    cursor = None  # Clear cursor when switching to max_id
-                    logger.info(
-                        f"Switching to max_id pagination for {date} (max_id: {max_id})"
-                    )
-
-                # Break if max_id is not progressing to avoid infinite loops
-                # 添加重试逻辑：当 max_id 未推进时，重试2次
-                if max_id and previous_max_id and max_id == previous_max_id:
-                    max_id_retry_count += 1
-                    if max_id_retry_count >= 2:
-                        logger.warning(
-                            f"max_id did not advance for {date} after {max_id_retry_count} retries (max_id: {max_id}); stopping to avoid loop"
-                        )
-                        completed = True
-                    else:
-                        logger.warning(
-                            f"max_id did not advance for {date} (max_id: {max_id}); retry {max_id_retry_count}/2"
-                        )
-                elif max_id and previous_max_id and max_id != previous_max_id:
-                    # max_id 成功推进，重置重试计数器
-                    max_id_retry_count = 0
                 
-                if not max_id and not cursor:
-                    completed = True
-                    logger.info(f"No more tweets available for {date} (empty response)")
+                if max_id == previous_max_id:
+                    max_id_retry_count += 1
+
+                    logger.warning(f"max_id did not advance for {date} after {max_id_retry_count}/5 retries (max_id: {max_id})")
+                    if max_id_retry_count >= 5:
+                        completed = True
+                else:
+                    max_id_retry_count = 0
 
                 previous_max_id = max_id
 
-                finished_now = (completed or (calls_made >= max_calls)) and (len(tweets) > 50000)
+                finished_now = calls_made >= max_calls
 
                 append_tweets(output_file, tweets)
 

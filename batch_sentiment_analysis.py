@@ -151,6 +151,9 @@ def sample_tweets(
     if exclude_ids:
         df = df[~df["id"].isin(exclude_ids)].copy()
         logger.info(f"Excluded {len(exclude_ids)} already processed tweets")
+    
+    # 不能重复
+    df = df.drop_duplicates(subset=["id"])
 
     if len(df) == 0:
         raise ValueError("No tweets available after filtering")
@@ -166,8 +169,6 @@ def sample_tweets(
         )
         return df
 
-    # 不能重复
-    df = df.drop_duplicates(subset=["id"])
     sampled = df.sample(n=sample_size, random_state=seed)
     logger.info(f"Sampled {len(sampled)} tweets from {len(df)} total")
 
@@ -193,15 +194,9 @@ def create_batch_request(tweet_id: str, tweet_text: str) -> Dict[str, Any]:
         "body": {
             "model": BATCH_MODEL,
             "reasoning": {"effort": "medium"},
-            "response_format": {
-                "type": "json_object",
-            },
-            "input": {
-                "messages": [
-                    {"role": "system", "content": [{"type": "prompt", "id": BATCH_PROMPT_ID}]},
-                    {"role": "user", "content": f"Tweet text: {tweet_text}"}
-                ]
-            }
+            "text": {"format": {"type": "json_object"}},
+            "prompt": {"id": BATCH_PROMPT_ID, "version": BATCH_PROMPT_VERSION},
+            "input": f"Please output the results in JSON format. \nTweet text: {tweet_text}"
         },
     }
 
@@ -602,14 +597,7 @@ def analyze_batch_results(content: str = "sample"):
 
     logger.info(f"Found {len(batches_to_process)} batches to analyze")
 
-    all_results = []
-    all_usage = {
-        "input_tokens": 0,
-        "cached_tokens": 0,
-        "output_tokens": 0,
-        "reasoning_tokens": 0,
-        "total_tokens": 0,
-    }
+    all_results = set()
 
     for batch_info in tqdm(batches_to_process, desc="Analyzing batches"):
         batch_index = batch_info.get("index")
@@ -632,199 +620,33 @@ def analyze_batch_results(content: str = "sample"):
             continue
 
         # Read results using jsonlines
-        try:
-            with jsonlines.open(results_file) as reader:
-                for result in reader:
-                    all_results.append(result)
-
-                    response = result.get("response", {})
-                    status_code = response.get("status_code", 200)
-                    body = response.get("body")
-                    parsed_body = None
-                    if status_code == 200 and body is not None:
+        with jsonlines.open(results_file) as reader:
+            for result in reader:
+                custom_id = result.get("custom_id")
+                opinion = None
+                outputs = result["response"]["body"]["output"]
+                for output in outputs:
+                    if output["type"] == "message":
+                        opinion_json = output["content"][0]["text"]
                         try:
-                            parsed_body = (
-                                json.loads(body) if isinstance(body, str) else body
-                            )
-                        except Exception:
-                            parsed_body = None
+                            opinion = json.loads(opinion_json).get("opinion")
+                        except Exception as e:
+                            logger.error(f"Failed to parse opinion JSON: {e}, {opinion_json}")
+                        if opinion is not None:
+                            break
+                all_results.add((custom_id, opinion))
 
-                    # Extract usage from parsed body if available
-                    if isinstance(parsed_body, dict):
-                        usage = parsed_body.get("usage", {})
-                        if usage:
-                            input_tokens = usage.get(
-                                "prompt_tokens", usage.get("input_tokens", 0)
-                            )
-                            cached_tokens = usage.get("input_tokens_details", {}).get(
-                                "cached_tokens", 0
-                            )
-                            output_tokens = usage.get(
-                                "completion_tokens", usage.get("output_tokens", 0)
-                            )
-                            reasoning_tokens = usage.get(
-                                "output_tokens_details", {}
-                            ).get("reasoning_tokens", usage.get("reasoning_tokens", 0))
-                            total_tokens = usage.get(
-                                "total_tokens", input_tokens + output_tokens
-                            )
-                            all_usage["input_tokens"] += input_tokens
-                            all_usage["cached_tokens"] += cached_tokens
-                            all_usage["output_tokens"] += output_tokens
-                            all_usage["reasoning_tokens"] += reasoning_tokens
-                            all_usage["total_tokens"] += total_tokens
-                        # stash parsed body to avoid reparsing later
-                        result["_parsed_body"] = parsed_body
+    all_results = list(all_results)
+    all_results_df = pd.DataFrame(all_results, columns=["custom_id", "opinion"])
+    
+    opinion_counts = all_results_df["opinion"].value_counts()
+    opinion_percentages = opinion_counts / opinion_counts.sum() * 100
 
-                    # Track processed ID (even if failed)
-                    custom_id = result.get("custom_id")
-        except Exception as e:
-            logger.warning(f"Failed to read results file for batch {batch_index}: {e}")
-
-    # Parse opinions
-    opinions = []
-    for result in all_results:
-        custom_id = result.get("custom_id")
-        response = result.get("response", {})
-        status_code = response.get("status_code", 200)
-        parsed_body = result.get("_parsed_body")
-
-        # Extract opinion from response
-        # OpenAI batch results format: response.body contains the actual response
-        opinion = None
-        error_message = result.get("error")
-
-        if status_code == 200:
-            body = response.get("body")
-            if parsed_body is None:
-                try:
-                    parsed_body = json.loads(body) if isinstance(body, str) else body
-                except Exception as e:
-                    error_message = str(e)
-            if isinstance(parsed_body, dict):
-                opinion = parsed_body.get("opinion")
-            elif parsed_body is None and error_message is None:
-                error_message = "Unable to parse response body"
-        else:
-            body = response.get("body", {})
-            if isinstance(body, dict):
-                error_message = body.get("error", {}).get(
-                    "message", body.get("message", f"Status code: {status_code}")
-                )
-            else:
-                error_message = f"Status code: {status_code}"
-
-        opinions.append(
-            {
-                "id": custom_id.split("-")[1],
-                "opinion": opinion,
-                "error": error_message if error_message else None,
-            }
-        )
-
-    # Generate summary
-    opinion_counts = {
-        -2: 0,
-        -1: 0,
-        0: 0,
-        1: 0,
-        2: 0,
-        "cannot tell": 0,
-        None: 0,
-    }
-
-    for op in opinions:
-        opinion = op["opinion"]
-        if opinion in opinion_counts:
-            opinion_counts[opinion] += 1
-        else:
-            opinion_counts[None] += 1
-
-    total = len(opinions)
-    error_count = sum(1 for op in opinions if op.get("error") is not None)
-
-    summary = {
-        "total_analyzed": total,
-        "successful": total - error_count,
-        "errors": error_count,
-        "opinion_distribution": {
-            "-2 (strongly negative)": opinion_counts[-2],
-            "-1 (mildly negative)": opinion_counts[-1],
-            "0 (neutral)": opinion_counts[0],
-            "1 (mildly positive)": opinion_counts[1],
-            "2 (strongly positive)": opinion_counts[2],
-            "cannot tell": opinion_counts["cannot tell"],
-            "invalid": opinion_counts[None],
-        },
-        "token_usage": all_usage,
-    }
-
-    # Calculate percentages
-    if total > 0:
-        summary["opinion_percentages"] = {
-            "-2": round(opinion_counts[-2] / total * 100, 2),
-            "-1": round(opinion_counts[-1] / total * 100, 2),
-            "0": round(opinion_counts[0] / total * 100, 2),
-            "1": round(opinion_counts[1] / total * 100, 2),
-            "2": round(opinion_counts[2] / total * 100, 2),
-            "cannot tell": round(opinion_counts["cannot tell"] / total * 100, 2),
-            "invalid": round(opinion_counts[None] / total * 100, 2),
-        }
-
-    # Save results
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(SENTIMENT_OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save detailed results
-    results_df = pd.DataFrame(opinions)
-    results_file = output_dir / f"batch_results_{timestamp}.csv"
-    results_df.to_csv(results_file, index=False)
-    logger.info(f"Saved detailed results to {results_file}")
-
-    # Save summary
-    summary_file = output_dir / f"batch_summary_{timestamp}.json"
-    with open(summary_file, "w") as f:
-        json.dump(summary, f, indent=2)
-    logger.info(f"Saved summary to {summary_file}")
-
-    # Print summary
-    print("\n=== Batch Analysis Summary ===")
-    print(f"Total tweets analyzed: {summary['total_analyzed']}")
-    print(f"Successful: {summary['successful']}")
-    print(f"Errors: {summary['errors']}")
-    print("\nOpinion Distribution:")
-    for key, value in summary["opinion_distribution"].items():
-        pct = summary.get("opinion_percentages", {}).get(
-            key.replace(" (strongly negative)", "")
-            .replace(" (mildly negative)", "")
-            .replace(" (neutral)", "")
-            .replace(" (mildly positive)", "")
-            .replace(" (strongly positive)", ""),
-            0,
-        )
-        print(f"  {key}: {value} ({pct}%)")
-    print("\nToken Usage:")
-    print(f"  Input tokens: {all_usage['input_tokens']:,}")
-    print(f"  Cached tokens: {all_usage['cached_tokens']:,}")
-    print(f"  Output tokens: {all_usage['output_tokens']:,}")
-    print(f"  Reasoning tokens: {all_usage['reasoning_tokens']:,}")
-    print(f"  Total tokens: {all_usage['total_tokens']:,}")
-    if all_usage["total_tokens"] > 0:
-        print(f"\nToken Efficiency:")
-        print(
-            f"  Cache hit rate: {all_usage['cached_tokens'] / all_usage['input_tokens'] * 100:.2f}%"
-            if all_usage["input_tokens"] > 0
-            else "  Cache hit rate: N/A"
-        )
-    print(f"\nResults saved to: {output_dir}")
-
-    if error_count > 0:
-        error_samples = [op for op in opinions if op.get("error")][:10]
-        print("\nErrors detected in analysis:")
-        for err in error_samples:
-            print(f"  id={err.get('id')}, error={err.get('error')}")
-        raise RuntimeError(f"{error_count} errors found during batch analysis")
+    print(f"Opinion counts: \n{opinion_counts}")
+    print(f"Opinion percentages: \n{opinion_percentages}")
+    
+    all_results_df.to_parquet(Path(SENTIMENT_OUTPUT_DIR) / "batch_results.parquet")
+    print(f"\nResults saved to: {SENTIMENT_OUTPUT_DIR} / 'batch_results.parquet'")
 
     logger.info("=== Batch Analysis Complete ===")
 
