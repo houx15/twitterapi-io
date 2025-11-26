@@ -113,18 +113,23 @@ def build_query(
     # Create OR query for all keywords
     keyword_query = " OR ".join([f'"{kw}"' if " " in kw else kw for kw in keywords])
 
-
     # Add max_id if provided
     if max_id:
         query = f"({keyword_query}) lang:{language} since:{since_date} max_id:{max_id}"
     elif until_time_str:
         # until time str format: "%a %b %d %H:%M:%S +0000 %Y"
         # what should be in the query: since/until:2021-12-31_23:59:59_UTC
-        until_str = datetime.strptime(until_time_str, "%a %b %d %H:%M:%S +0000 %Y").strftime("%Y-%m-%d_%H:%M:%S_UTC")
-        since_str = datetime.strptime(since_date, "%Y-%m-%d").strftime("%Y-%m-%d_%H:%M:%S_UTC")
+        until_str = datetime.strptime(
+            until_time_str, "%a %b %d %H:%M:%S +0000 %Y"
+        ).strftime("%Y-%m-%d_%H:%M:%S_UTC")
+        since_str = datetime.strptime(since_date, "%Y-%m-%d").strftime(
+            "%Y-%m-%d_%H:%M:%S_UTC"
+        )
         query = f"({keyword_query}) lang:{language} since:{since_str} until:{until_str}"
     else:
-        query = f"({keyword_query}) lang:{language} since:{since_date} until:{until_date}"
+        query = (
+            f"({keyword_query}) lang:{language} since:{since_date} until:{until_date}"
+        )
 
     return query
 
@@ -215,7 +220,11 @@ def crawl_tweets_for_date(
                     params["cursor"] = cursor
                 elif max_id:
                     if max_id_retry_count >= 2:
-                        query = build_query(KEYWORDS, date, max_id=str(int(max_id) - (1000 * max_id_retry_count)))
+                        query = build_query(
+                            KEYWORDS,
+                            date,
+                            max_id=str(int(max_id) - (1000 * max_id_retry_count)),
+                        )
                     else:
                         query = build_query(KEYWORDS, date, max_id=max_id)
                     params["query"] = query
@@ -291,36 +300,77 @@ def crawl_tweets_for_date(
                 next_cursor = data.get("next_cursor")
                 new_until_time_str = data.get("createdAt")
 
+                # Update cursor for next iteration (if using cursor-based pagination)
+                if next_cursor:
+                    cursor = next_cursor
+                elif not has_next_page:
+                    # No more pages, clear cursor
+                    cursor = ""
+
                 # Update max_id from the last tweet if we have tweets
                 if tweets:
                     last_tweet_id = tweets[-1].get("id")
                     # check createdat
                     created_at = tweets[-1].get("createdAt")
-                    created_at_date = datetime.strptime(created_at, "%a %b %d %H:%M:%S +0000 %Y")
-                    if (created_at_date.date() == datetime.strptime(date, "%Y-%m-%d").date()) and (int(last_tweet_id) < int(max_id)):
-                        max_id = last_tweet_id
-                        until_time_str = new_until_time_str
-                    else:
-                        min_valid_id = None
-                        for tweet in tweets:
-                            if tweet.get("createdAt") and tweet.get("id"):
-                                created_at = tweet.get("createdAt")
-                                created_at_date = datetime.strptime(created_at, "%a %b %d %H:%M:%S +0000 %Y")
-                                if created_at_date.date() == datetime.strptime(date, "%Y-%m-%d").date():
-                                    if (not min_valid_id) or (int(tweet.get("id")) < int(min_valid_id)):
-                                        min_valid_id = tweet.get("id")
-                                        new_until_time_str = tweet.get("createdAt")
-                        if min_valid_id and int(min_valid_id) < int(max_id):
+                    created_at_date = datetime.strptime(
+                        created_at, "%a %b %d %H:%M:%S +0000 %Y"
+                    )
+
+                    # Find the minimum valid tweet ID for the target date
+                    min_valid_id = None
+                    min_valid_created_at = None
+                    for tweet in tweets:
+                        if tweet.get("createdAt") and tweet.get("id"):
+                            tweet_created_at = tweet.get("createdAt")
+                            tweet_created_at_date = datetime.strptime(
+                                tweet_created_at, "%a %b %d %H:%M:%S +0000 %Y"
+                            )
+                            if (
+                                tweet_created_at_date.date()
+                                == datetime.strptime(date, "%Y-%m-%d").date()
+                            ):
+                                tweet_id = tweet.get("id")
+                                if (not min_valid_id) or (
+                                    int(tweet_id) < int(min_valid_id)
+                                ):
+                                    min_valid_id = tweet_id
+                                    min_valid_created_at = tweet_created_at
+
+                    # Update max_id if we found valid tweets for the target date
+                    if min_valid_id:
+                        # If max_id is None (first call), initialize it
+                        if max_id is None:
                             max_id = min_valid_id
-                            until_time_str = new_until_time_str
+                            until_time_str = min_valid_created_at
+                            logger.info(f"Initialized max_id for {date}: {max_id}")
+                        # If we found a smaller ID, update max_id (for pagination)
+                        elif int(min_valid_id) < int(max_id):
+                            max_id = min_valid_id
+                            until_time_str = min_valid_created_at
+                            logger.info(f"Updated max_id for {date}: {max_id}")
                         else:
-                            logger.warning(f"Wrong data for {date} (created_at: {created_at_date}, last_tweet_id: {last_tweet_id}, max_id: {max_id})")
-                            next_cursor = None
-                
-                if max_id == previous_max_id:
+                            # No smaller ID found, might have reached the end
+                            logger.warning(
+                                f"No smaller ID found for {date} (min_valid_id: {min_valid_id}, max_id: {max_id})"
+                            )
+                    else:
+                        # No valid tweets for target date in this batch
+                        logger.warning(
+                            f"No valid tweets for target date {date} in this batch"
+                        )
+                        # Don't set next_cursor to None here, let the API's has_next_page decide
+
+                # Check if max_id advanced (only if both are not None)
+                if (
+                    max_id is not None
+                    and previous_max_id is not None
+                    and max_id == previous_max_id
+                ):
                     max_id_retry_count += 1
 
-                    logger.warning(f"max_id did not advance for {date} after {max_id_retry_count}/5 retries (max_id: {max_id})")
+                    logger.warning(
+                        f"max_id did not advance for {date} after {max_id_retry_count}/5 retries (max_id: {max_id})"
+                    )
                     if max_id_retry_count >= 5:
                         completed = True
                 else:
@@ -507,6 +557,7 @@ def crawl_twenty_rounds():
         sleep_time = random.randint(10, 60)
         time.sleep(sleep_time)
         logger.info(f"Crawled {i+1} rounds, sleeping for {sleep_time} seconds")
+
 
 if __name__ == "__main__":
     fire.Fire({"test": test, "crawl": crawl, "crawl20": crawl_twenty_rounds})
