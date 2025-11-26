@@ -21,6 +21,7 @@ from typing import List, Dict, Any, Optional
 from tqdm import tqdm
 import fire
 import time
+import random
 
 # Import configuration
 from config import (
@@ -91,6 +92,7 @@ def build_query(
     date: str,
     language: str = LANGUAGE,
     max_id: Optional[str] = None,
+    until_time_str: Optional[str] = None,
 ) -> str:
     """
     Build the query string for Twitter API.
@@ -111,12 +113,18 @@ def build_query(
     # Create OR query for all keywords
     keyword_query = " OR ".join([f'"{kw}"' if " " in kw else kw for kw in keywords])
 
-    # Add date and language filters
-    query = f"({keyword_query}) lang:{language} since:{since_date} until:{until_date}"
 
     # Add max_id if provided
     if max_id:
-        query = f"{query} max_id:{max_id}"
+        query = f"({keyword_query}) lang:{language} since:{since_date} max_id:{max_id}"
+    elif until_time_str:
+        # until time str format: "%a %b %d %H:%M:%S +0000 %Y"
+        # what should be in the query: since/until:2021-12-31_23:59:59_UTC
+        until_str = datetime.strptime(until_time_str, "%a %b %d %H:%M:%S +0000 %Y").strftime("%Y-%m-%d_%H:%M:%S_UTC")
+        since_str = datetime.strptime(since_date, "%Y-%m-%d").strftime("%Y-%m-%d_%H:%M:%S_UTC")
+        query = f"({keyword_query}) lang:{language} since:{since_str} until:{until_str}"
+    else:
+        query = f"({keyword_query}) lang:{language} since:{since_date} until:{until_date}"
 
     return query
 
@@ -146,6 +154,7 @@ def crawl_tweets_for_date(
     state: Optional[Dict[str, Any]] = None,
     total_written: int = 0,
     start_max_id: Optional[str] = None,
+    until_time_str: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Crawl tweets for a specific date.
@@ -160,6 +169,7 @@ def crawl_tweets_for_date(
         state: Optional shared state dict to update/save per response
         total_written: Starting count of tweets already written for this date
         start_max_id: Optional max_id to resume from (for pagination beyond initial limit)
+        until_time_str: Optional until time string to resume from
 
     Returns:
         Dictionary with crawl results
@@ -167,6 +177,7 @@ def crawl_tweets_for_date(
     base_query = build_query(KEYWORDS, date)
     headers = {"X-API-Key": API_KEY}
 
+    until_time_str = until_time_str or ""
     cursor = start_cursor or ""
     max_id = start_max_id
     previous_max_id = None
@@ -175,6 +186,7 @@ def crawl_tweets_for_date(
     max_calls = 1 if test_mode else (max_calls or CALLS_PER_DATE)
     completed = False
     last_batch: List[Dict[str, Any]] = []
+    max_id_retry_count = 0  # 跟踪 max_id 未推进的重试次数
 
     if calls_made >= max_calls:
         return {
@@ -201,8 +213,12 @@ def crawl_tweets_for_date(
 
                 if cursor:
                     params["cursor"] = cursor
-                elif max_id:
-                    params["query"] = f"{query} max_id:{max_id}"
+                elif max_id and max_id_retry_count == 0:
+                    query = build_query(KEYWORDS, date, max_id=max_id)
+                    params["query"] = query
+                elif max_id and max_id_retry_count > 0:
+                    query = build_query(KEYWORDS, date, until_time_str=until_time_str)
+                    params["query"] = query
 
                 # Make API request
                 attempt = 0
@@ -270,12 +286,33 @@ def crawl_tweets_for_date(
                 # Check if there are more pages
                 has_next_page = data.get("has_next_page", False)
                 next_cursor = data.get("next_cursor")
+                new_until_time_str = data.get("createdAt")
 
                 # Update max_id from the last tweet if we have tweets
                 if tweets:
                     last_tweet_id = tweets[-1].get("id")
-                    max_id = last_tweet_id
-
+                    # check createdat
+                    created_at = tweets[-1].get("createdAt")
+                    created_at_date = datetime.strptime(created_at, "%a %b %d %H:%M:%S +0000 %Y")
+                    if (created_at_date.date() == datetime.strptime(date, "%Y-%m-%d").date()) and (int(last_tweet_id) < int(max_id)):
+                        max_id = last_tweet_id
+                        until_time_str = new_until_time_str
+                    else:
+                        min_valid_id = None
+                        for tweet in tweets:
+                            if tweet.get("createdAt") and tweet.get("id"):
+                                created_at = tweet.get("createdAt")
+                                created_at_date = datetime.strptime(created_at, "%a %b %d %H:%M:%S +0000 %Y")
+                                if created_at_date.date() == datetime.strptime(date, "%Y-%m-%d").date():
+                                    if (not min_valid_id) or (int(tweet.get("id")) < int(min_valid_id)):
+                                        min_valid_id = tweet.get("id")
+                                        new_until_time_str = tweet.get("createdAt")
+                        if min_valid_id and int(min_valid_id) < int(max_id):
+                            max_id = min_valid_id
+                            until_time_str = new_until_time_str
+                        else:
+                            logger.warning(f"Wrong data for {date} (created_at: {created_at_date}, last_tweet_id: {last_tweet_id}, max_id: {max_id})")
+                            next_cursor = None
                 # Determine if we should continue
                 # If no tweets returned, we're truly done
                 if not tweets:
@@ -297,21 +334,31 @@ def crawl_tweets_for_date(
                     )
 
                 # Break if max_id is not progressing to avoid infinite loops
-                if max_id == previous_max_id:
-                    logger.warning(
-                        f"max_id did not advance for {date} (max_id: {max_id}); stopping to avoid loop"
-                    )
-                    completed = True
+                # 添加重试逻辑：当 max_id 未推进时，重试2次
+                if max_id and previous_max_id and max_id == previous_max_id:
+                    max_id_retry_count += 1
+                    if max_id_retry_count >= 2:
+                        logger.warning(
+                            f"max_id did not advance for {date} after {max_id_retry_count} retries (max_id: {max_id}); stopping to avoid loop"
+                        )
+                        completed = True
+                    else:
+                        logger.warning(
+                            f"max_id did not advance for {date} (max_id: {max_id}); retry {max_id_retry_count}/2"
+                        )
+                elif max_id and previous_max_id and max_id != previous_max_id:
+                    # max_id 成功推进，重置重试计数器
+                    max_id_retry_count = 0
+                
                 if not max_id and not cursor:
                     completed = True
                     logger.info(f"No more tweets available for {date} (empty response)")
 
                 previous_max_id = max_id
 
-                finished_now = completed or (calls_made >= max_calls)
+                finished_now = (completed or (calls_made >= max_calls)) and (len(tweets) > 50000)
 
-                if output_file:
-                    append_tweets(output_file, tweets)
+                append_tweets(output_file, tweets)
 
                 total_written += len(tweets)
 
@@ -322,6 +369,7 @@ def crawl_tweets_for_date(
                         "calls_made": calls_made,
                         "current_cursor": cursor,
                         "max_id": max_id,
+                        "until_time_str": until_time_str,
                     }
                     save_state(state)
 
@@ -350,6 +398,7 @@ def crawl_tweets_for_date(
         "tweets": last_batch,
         "finished": completed or calls_made >= max_calls,
         "total_written": total_written,
+        "until_time_str": until_time_str,
     }
 
 
@@ -430,6 +479,7 @@ def crawl():
             resume_cursor = state.get(date, {}).get("current_cursor", "")
             resume_calls = state.get(date, {}).get("calls_made", 0)
             resume_max_id = state.get(date, {}).get("max_id")
+            resume_until_time_str = state.get(date, {}).get("until_time_str")
 
             logger.info(
                 f"Starting crawl for {date} (resume from call {resume_calls}, max_id: {resume_max_id})"
@@ -447,6 +497,7 @@ def crawl():
                 state=state,
                 total_written=total_written,
                 start_max_id=resume_max_id,
+                until_time_str=resume_until_time_str,
             )
 
             # Ensure state is saved even if no batches were processed
@@ -460,6 +511,7 @@ def crawl():
                     "calls_made": result["calls_made"],
                     "current_cursor": result["last_cursor"],
                     "max_id": result.get("max_id"),
+                    "until_time_str": result.get("until_time_str"),
                 }
                 save_state(state)
 
@@ -477,5 +529,12 @@ def crawl():
     print(f"Total API calls made: {total_calls}")
 
 
+def crawl_twenty_rounds():
+    for i in range(100):
+        crawl()
+        sleep_time = random.randint(10, 60)
+        time.sleep(sleep_time)
+        logger.info(f"Crawled {i+1} rounds, sleeping for {sleep_time} seconds")
+
 if __name__ == "__main__":
-    fire.Fire({"test": test, "crawl": crawl})
+    fire.Fire({"test": test, "crawl": crawl, "crawl20": crawl_twenty_rounds})

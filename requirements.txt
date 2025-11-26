@@ -5,5 +5,4 @@ pandas>=2.2.0
 fastparquet>=2024.2.0
 openai>=1.6.0
 pyarrow>=14.0.0
-pandas>=2.0.0
-openai>=1.0.0
+jsonlines>=3.1.0
