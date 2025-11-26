@@ -23,6 +23,12 @@ DATA_DIR = "tweet_data"
 TEST_OUTPUT_FILE = "test.jsonl"
 PARQUET_OUTPUT_DIR = "parquet_data"
 SENTIMENT_OUTPUT_DIR = "sentiment_results"
+# Batch processing configuration
+BATCH_MAX_LINES = 20  # Max requests per batch file
+BATCH_PROMPT_ID = "YOUR_PROMPT_ID"  # Replace with your prompt id
+BATCH_PROMPT_VERSION = "latest"  # Replace with your prompt version
+BATCH_MODEL = "gpt-4.1"  # Model used for batch responses
+BATCH_LIST_FILE = "sentiment_results/batch_list.json"
 
 # Keywords to search for
 KEYWORDS = [
