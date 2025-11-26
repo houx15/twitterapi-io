@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 # Derived paths
 BATCH_BASE_DIR = Path(SENTIMENT_OUTPUT_DIR) / "batches"
-CACHE_FILE = Path(SENTIMENT_OUTPUT_DIR) / "processed_ids.json"
+CACHE_FILE = Path(SENTIMENT_OUTPUT_DIR) / "processed_ids.txt"
 
 
 def load_processed_ids() -> Set[str]:
@@ -62,23 +62,18 @@ def load_processed_ids() -> Set[str]:
     if CACHE_FILE.exists():
         try:
             with open(CACHE_FILE, "r") as f:
-                data = json.load(f)
-                return set(data.get("processed_ids", []))
+                return set(f.read().splitlines())
         except Exception as e:
             logger.warning(f"Failed to load cache file: {e}")
     return set()
 
 
-def save_processed_ids(processed_ids: Set[str]):
+def save_processed_id(new_id: str):
     """Save processed tweet IDs to cache file."""
     CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "processed_ids": list(processed_ids),
-        "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    with open(CACHE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-    logger.info(f"Saved {len(processed_ids)} processed IDs to cache")
+    with open(CACHE_FILE, "a") as f:
+        f.write(new_id + "\n")
+    logger.info(f"Saved {new_id} to cache")
 
 
 def load_parquet_files_filtered_by_date(
@@ -358,6 +353,7 @@ def submit_batch(
             if tweet_id and tweet_text:
                 requests.append(create_batch_request(str(tweet_id), tweet_text))
                 processed_ids.add(str(tweet_id))
+                save_processed_id(str(tweet_id))
         return requests
 
     def write_requests_chunk(requests: List[Dict[str, Any]], mode: str) -> int:
@@ -402,8 +398,6 @@ def submit_batch(
         for chunk in split_into_batches(batch_requests):
             created_batches.append(write_requests_chunk(chunk, content))
 
-    # Persist processed ids immediately after creation
-    save_processed_ids(processed_ids)
     if created_batches:
         logger.info(f"Created batches: {created_batches}")
     
