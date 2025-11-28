@@ -108,7 +108,7 @@ def load_parquet_files_filtered_by_date(
                     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
                     # Filter by target days from config
                     if date_obj.day in TARGET_DAYS:
-                        df = pd.read_parquet(pf, columns=["id", "text"])
+                        df = pd.read_parquet(pf, columns=["id", "text", "likeCount", "author.id", "createdAt"])
                         dfs.append(df)
                         logger.debug(
                             f"Loaded {len(df)} tweets from {pf.name} (date: {date_str}, day: {date_obj.day})"
@@ -622,7 +622,7 @@ def analyze_batch_results(content: str = "sample"):
         # Read results using jsonlines
         with jsonlines.open(results_file) as reader:
             for result in reader:
-                custom_id = result.get("custom_id")
+                custom_id = result["custom_id"].split("-")[1]
                 opinion = None
                 outputs = result["response"]["body"]["output"]
                 for output in outputs:
@@ -638,6 +638,8 @@ def analyze_batch_results(content: str = "sample"):
 
     all_results = list(all_results)
     all_results_df = pd.DataFrame(all_results, columns=["custom_id", "opinion"])
+    # opinion cannot tell -> na
+    all_results_df["opinion"].replace("cannot tell", None, inplace=True)
     
     opinion_counts = all_results_df["opinion"].value_counts()
     opinion_percentages = opinion_counts / opinion_counts.sum() * 100
@@ -649,6 +651,134 @@ def analyze_batch_results(content: str = "sample"):
     print(f"\nResults saved to: {SENTIMENT_OUTPUT_DIR} / 'batch_results.parquet'")
 
     logger.info("=== Batch Analysis Complete ===")
+
+
+def calculate_daily_average():
+    """
+    Calculate daily average opinion metrics from merged tweet and sentiment data.
+    
+    Steps:
+    1. Load tweets using load_parquet_files_filtered_by_date
+    2. Load batch_results.parquet and merge by tweet_id
+    3. Convert createdAt to datetime
+    4. Remove NA values in opinion
+    5. Group by date and calculate:
+       - avg_opinion: mean opinion per date
+       - weighted_opinion: likeCount-weighted mean opinion per date
+       - user_avg_opinion: mean of user-level mean opinions per date
+    6. Save to twitter_daily_opinion.parquet
+    """
+    logger.info("=== Starting Daily Average Calculation ===")
+    
+    # Step 1: Load tweets
+    logger.info("Loading tweets from parquet files...")
+    tweets_df = load_parquet_files_filtered_by_date()
+    logger.info(f"Loaded {len(tweets_df)} tweets")
+    
+    # Step 2: Load batch results and merge
+    batch_results_path = Path(SENTIMENT_OUTPUT_DIR) / "batch_results.parquet"
+    if not batch_results_path.exists():
+        raise FileNotFoundError(f"Batch results file not found: {batch_results_path}")
+    
+    logger.info("Loading batch results...")
+    batch_results_df = pd.read_parquet(batch_results_path)
+    logger.info(f"Loaded {len(batch_results_df)} batch results")
+    
+    
+    # Ensure id types match for merging
+    tweets_df["id"] = tweets_df["id"].astype(str)
+    batch_results_df["custom_id"] = batch_results_df["custom_id"].astype(str)
+    
+    # Merge on tweet_id (tweets_df has 'id' column)
+    merged_df = tweets_df.merge(
+        batch_results_df[["custom_id", "opinion"]],
+        left_on="id",
+        right_on="custom_id",
+        how="inner"
+    )
+    logger.info(f"Merged data: {len(merged_df)} rows")
+    
+    # Step 3: Convert createdAt to datetime
+    logger.info("Converting createdAt to datetime...")
+    merged_df["createdAt_dt"] = merged_df["createdAt"].apply(
+        lambda x: datetime.strptime(x, "%a %b %d %H:%M:%S +0000 %Y")
+    )
+    
+    # Step 4: Remove NA values in opinion
+    logger.info("Removing NA values in opinion...")
+    initial_count = len(merged_df)
+    merged_df = merged_df.dropna(subset=["opinion"])
+    logger.info(f"Removed {initial_count - len(merged_df)} rows with NA opinion")
+    
+    # Convert opinion to numeric if it's not already
+    merged_df["opinion"] = pd.to_numeric(merged_df["opinion"], errors="coerce")
+    merged_df = merged_df.dropna(subset=["opinion"])
+    logger.info(f"After numeric conversion: {len(merged_df)} rows")
+    
+    # Extract date (yyyy-mm-dd format)
+    merged_df["date"] = merged_df["createdAt_dt"].dt.date
+    
+    # Step 5: Calculate daily metrics using aggregation
+    logger.info("Calculating daily metrics...")
+    
+    # 1. avg_opinion: mean opinion per date
+    daily_avg = merged_df.groupby("date")["opinion"].mean().reset_index()
+    daily_avg.columns = ["date", "avg_opinion"]
+    
+    # 2. weighted_opinion: likeCount-weighted mean (add 1 to all likeCount to avoid 0)
+    # 加权平均 = sum(opinion * (likeCount + 1)) / sum(likeCount + 1)
+    merged_df["likeCount_plus_one"] = merged_df["likeCount"] + 1
+    merged_df["opinion_likeCount"] = merged_df["opinion"] * merged_df["likeCount_plus_one"]
+    
+    daily_weighted = (
+        merged_df.groupby("date")
+        .agg({
+            "opinion_likeCount": "sum",
+            "likeCount_plus_one": "sum",
+        })
+        .reset_index()
+    )
+    # 计算加权平均
+    daily_weighted["weighted_opinion"] = (
+        daily_weighted["opinion_likeCount"] / daily_weighted["likeCount_plus_one"]
+    )
+    daily_weighted = daily_weighted[["date", "weighted_opinion"]]
+    
+    # 3. user_avg_opinion: mean of user-level mean opinions per date
+    # 先计算每个user在每个date的平均opinion
+    user_daily_avg = (
+        merged_df.groupby(["date", "author.id"])["opinion"].mean().reset_index()
+    )
+    user_daily_avg.columns = ["date", "author.id", "user_daily_avg_opinion"]
+    
+    # 然后计算每个date的所有user的平均opinion（即user_avg_opinion）
+    daily_user_avg = (
+        user_daily_avg.groupby("date")["user_daily_avg_opinion"].mean().reset_index()
+    )
+    daily_user_avg.columns = ["date", "user_avg_opinion"]
+    
+    # Merge all results
+    result_df = daily_avg.merge(daily_weighted, on="date", how="outer")
+    result_df = result_df.merge(daily_user_avg, on="date", how="outer")
+    
+    # Convert date to string format (yyyy-mm-dd)
+    result_df["date"] = result_df["date"].astype(str)
+    result_df = result_df.sort_values("date")
+    
+    logger.info(f"Calculated metrics for {len(result_df)} dates")
+    
+    # Step 6: Save to parquet
+    output_path = Path(SENTIMENT_OUTPUT_DIR) / "twitter_daily_opinion.parquet"
+    result_df.to_parquet(output_path, index=False)
+    logger.info(f"Results saved to: {output_path}")
+    
+    print(f"\n=== Daily Average Calculation Complete ===")
+    print(f"Processed {len(merged_df)} tweets across {len(result_df)} dates")
+    print(f"Results saved to: {output_path}")
+    print(f"\nSample results:")
+    print(result_df.head(10))
+    
+    logger.info("=== Daily Average Calculation Complete ===")
 
 
 class BatchSentimentCLI:
@@ -674,6 +804,10 @@ class BatchSentimentCLI:
     def analyze(self):
         """Analyze batch results."""
         analyze_batch_results(content=self.content)
+    
+    def calculate(self):
+        """Calculate daily average opinion metrics."""
+        calculate_daily_average()
 
 
 def main():

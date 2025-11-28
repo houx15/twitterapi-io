@@ -262,10 +262,22 @@ def convert(
         print(f"Output directory: {output_path}")
 
 
+def convert_one_day(date: str):
+    """
+    Convert a single day of tweets to Parquet.
+    tweets_YYYY-MM-DD.jsonl -> tweets_YYYY-MM-DD.parquet
+    """
+    json_files = Path(DATA_DIR).glob(f"tweets_{date}.jsonl")
+    for json_file in json_files:
+        count = convert_file(json_file, Path(PARQUET_OUTPUT_DIR))
+        print(f"Converted {count} tweets: {json_file.name} ")
+
+
 def main():
     """Main entry point using fire package."""
     fire.Fire({
         "convert": convert,
+        "convert_one_day": convert_one_day,
     })
 
 
