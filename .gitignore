@@ -1,5 +1,6 @@
 # Configuration file with sensitive API keys
 config.py
+configs/*
 
 # State and log files
 crawler_state.json
@@ -34,3 +35,5 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+figures/
