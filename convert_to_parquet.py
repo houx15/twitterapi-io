@@ -101,6 +101,7 @@ def extract_tweet_data(tweet: Dict[str, Any]) -> Dict[str, Any]:
         "author.verifiedType": _to_str(author.get("verifiedType")),
         "author.followers": _to_int(author.get("followers")),
         "author.following": _to_int(author.get("following")),
+        "author.location": _to_str(author.get("location")),
     }
 
 

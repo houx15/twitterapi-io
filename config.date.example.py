@@ -23,6 +23,7 @@ DATA_DIR = "tweet_data"
 TEST_OUTPUT_FILE = "test.jsonl"
 PARQUET_OUTPUT_DIR = "parquet_data"
 SENTIMENT_OUTPUT_DIR = "sentiment_results"
+USER_LOCATION_FILTER_OUTPUT_DIR = "user_location_filter"
 # Batch processing configuration
 BATCH_MAX_LINES = 20  # Max requests per batch file
 BATCH_PROMPT_ID = "YOUR_PROMPT_ID"  # Replace with your prompt id

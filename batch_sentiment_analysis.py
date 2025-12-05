@@ -43,6 +43,7 @@ from config import (
     BATCH_PROMPT_VERSION,
     BATCH_MODEL,
     BATCH_LIST_FILE,
+    USER_LOCATION_FILTER_OUTPUT_DIR,
 )
 
 # Setup logging
@@ -653,7 +654,7 @@ def analyze_batch_results(content: str = "sample"):
     logger.info("=== Batch Analysis Complete ===")
 
 
-def calculate_daily_average():
+def calculate_daily_average(location: Optional[str] = None):
     """
     Calculate daily average opinion metrics from merged tweet and sentiment data.
     
@@ -697,6 +698,15 @@ def calculate_daily_average():
         how="inner"
     )
     logger.info(f"Merged data: {len(merged_df)} rows")
+
+    # Step 2.5: filter by location if location is not None
+    if location == "us":
+        us_userids_path = Path(USER_LOCATION_FILTER_OUTPUT_DIR) / "us_userids.json"
+        if not us_userids_path.exists():
+            raise FileNotFoundError(f"US userids file not found: {us_userids_path}")
+        with open(us_userids_path, "r") as f:
+            us_userids = json.load(f)
+        merged_df = merged_df[merged_df["author.id"].isin(us_userids)]
     
     # Step 3: Convert createdAt to datetime
     logger.info("Converting createdAt to datetime...")
@@ -784,7 +794,7 @@ def calculate_daily_average():
 class BatchSentimentCLI:
     """CLI class for batch sentiment analysis."""
 
-    def __init__(self, content: str = "sample"):
+    def __init__(self, location: str = None, content: str = "sample"):
         """
         Initialize CLI.
 
@@ -792,6 +802,7 @@ class BatchSentimentCLI:
             content: Content to process ("sample" or "all")
         """
         self.content = content
+        self.location = location
 
     def submit(self, sample_size: Optional[int] = None, seed: int = 42):
         """Submit batch requests."""
@@ -807,7 +818,7 @@ class BatchSentimentCLI:
     
     def calculate(self):
         """Calculate daily average opinion metrics."""
-        calculate_daily_average()
+        calculate_daily_average(location=self.location)
 
 
 def main():
