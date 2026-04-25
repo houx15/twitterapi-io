@@ -9,15 +9,23 @@ original sentiment scores. For each sample post we:
   4. compare original vs cross-lingual scores
 
 Workflow:
-    sample_tweets          - stratified-by-opinion sample of 200 tweets
-    translate_weibo        - DeepL zh -> en for the weibo sample
-    translate_tweets       - DeepL en -> zh for the tweet sample
-    sample_translation     - spot-check 10 weibo + 10 tweet translations
-    submit_weibo_gpt       - submit GPT-5-mini batch on translated weibo
-    retrieve_weibo_gpt     - poll & download batch results
-    parse_weibo_gpt        - parse jsonl results into parquet
-    analyze_tweet_kimi     - Kimi live API on translated tweets (resumable)
-    diff                   - agreement metrics + per-row CSV report
+    Single-shot (one sample, one translation):
+        sample_tweets          - stratified-by-opinion sample of 200 tweets
+        translate_weibo        - DeepL zh -> en for the weibo sample
+        translate_tweets       - DeepL en -> zh for the tweet sample
+        sample_translation     - spot-check 10 weibo + 10 tweet translations
+
+    Per-round (5× by default — same translated text, repeat LLM scoring):
+        submit_weibo_gpt   --round N    - submit GPT batch
+        retrieve_weibo_gpt --round N    - poll & download batch results
+        parse_weibo_gpt    --round N    - parse jsonl results into parquet
+        analyze_tweet_kimi --round N    - Kimi live (resumable)
+        diff               --round N    - per-round agreement metrics
+
+    Orchestrators:
+        run_scoring --rounds 5  - per-round submit_gpt + kimi (stops after submit)
+        finalize    --rounds 5  - per-round retrieve/parse/diff, then aggregate
+        aggregate   --rounds 5  - mean/std + per-post LLM stability across rounds
 
 Required additions to config.py (see config.date.example.py for keys):
     DEEPL_API_KEY              (free vs pro endpoint auto-selected from key)
@@ -71,17 +79,34 @@ CROSS_LINGUAL_PATH.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_SAMPLE_SIZE = 200
 DEFAULT_SEED = 42
+DEFAULT_ROUNDS = 5
 
+# Shared across rounds — sampling and translation happen ONCE; only the LLM
+# re-scoring + per-round diff are repeated, so we can measure LLM stability on
+# the same translated text rather than mixing sampling variance into the result.
 WEIBO_SAMPLE_FILE = CROSS_LINGUAL_PATH / "weibo_translation_sample.parquet"
 TWEET_SAMPLE_FILE = CROSS_LINGUAL_PATH / "tweet_translation_sample.parquet"
 WEIBO_TRANSLATED_FILE = CROSS_LINGUAL_PATH / "weibo_translated.parquet"
 TWEET_TRANSLATED_FILE = CROSS_LINGUAL_PATH / "tweet_translated.parquet"
-WEIBO_REANALYZED_FILE = CROSS_LINGUAL_PATH / "weibo_reanalyzed_gpt.parquet"
-TWEET_REANALYZED_FILE = CROSS_LINGUAL_PATH / "tweet_reanalyzed_kimi.parquet"
+TRANSLATION_SAMPLE_CSV = CROSS_LINGUAL_PATH / "translation_sample.csv"
 DEEPL_CACHE_FILE = CROSS_LINGUAL_PATH / "deepl_cache.json"
-WEIBO_BATCH_REQUESTS = CROSS_LINGUAL_PATH / "weibo_en_requests.jsonl"
-WEIBO_BATCH_RESULTS = CROSS_LINGUAL_PATH / "weibo_en_results.jsonl"
-WEIBO_BATCH_STATE = CROSS_LINGUAL_PATH / "weibo_en_batch_state.json"
+AGGREGATE_REPORT_FILE = CROSS_LINGUAL_PATH / "aggregate_report.json"
+AGGREGATE_PER_ROW_FILE = CROSS_LINGUAL_PATH / "aggregate_per_row.csv"
+
+
+def _round_paths(round: int) -> dict:
+    """Per-round paths for LLM scoring + per-round diff (under round_<N>/)."""
+    d = CROSS_LINGUAL_PATH / f"round_{round}"
+    d.mkdir(parents=True, exist_ok=True)
+    return {
+        "weibo_reanalyzed": d / "weibo_reanalyzed_gpt.parquet",
+        "tweet_reanalyzed": d / "tweet_reanalyzed_kimi.parquet",
+        "weibo_batch_requests": d / "weibo_en_requests.jsonl",
+        "weibo_batch_results": d / "weibo_en_results.jsonl",
+        "weibo_batch_state": d / "weibo_en_batch_state.json",
+        "diff_report": d / "diff_report.json",
+        "diff_per_row": d / "diff_per_row.csv",
+    }
 
 # Original Chinese system prompt copied verbatim from
 # youth-analysis/ai_sentiment_analyzer.py so the Kimi reanalysis sees exactly
@@ -149,10 +174,10 @@ def _stratified_proportional_sample(
 def sample_tweets(
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     seed: int = DEFAULT_SEED,
-    output_file: Union[str, Path] = TWEET_SAMPLE_FILE,
 ):
-    """Sample tweets stratified by their existing GPT opinion score."""
-    logger.info("=== Sampling tweets ===")
+    """Sample tweets stratified by their existing GPT opinion score (single shot)."""
+    output_path = TWEET_SAMPLE_FILE
+    logger.info(f"=== Sampling tweets [seed {seed}] ===")
 
     batch_results_path = Path(SENTIMENT_OUTPUT_DIR) / "batch_results.parquet"
     if not batch_results_path.exists():
@@ -178,7 +203,6 @@ def sample_tweets(
     sampled = sampled.rename(columns={"opinion": "original_opinion"})
     out = sampled[["id", "text", "original_opinion", "createdAt"]]
 
-    output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(output_path, index=False)
 
@@ -248,46 +272,35 @@ def _translate_column(
     return df
 
 
-def translate_weibo(
-    weibo_sample_file: Union[str, Path] = WEIBO_SAMPLE_FILE,
-    output_file: Union[str, Path] = WEIBO_TRANSLATED_FILE,
-):
+def translate_weibo():
     """DeepL translate weibo sample (zh -> en)."""
     logger.info("=== Translating weibo zh -> en ===")
-    df = pd.read_parquet(weibo_sample_file)
+    df = pd.read_parquet(WEIBO_SAMPLE_FILE)
     df["weibo_id"] = df["weibo_id"].astype(str)
     df = _translate_column(df, src_col="weibo_content", target_lang="EN-US")
-    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(output_file, index=False)
-    logger.info(f"Saved {len(df)} translated weibo to {output_file}")
+    df.to_parquet(WEIBO_TRANSLATED_FILE, index=False)
+    logger.info(f"Saved {len(df)} translated weibo to {WEIBO_TRANSLATED_FILE}")
 
 
-def translate_tweets(
-    tweet_sample_file: Union[str, Path] = TWEET_SAMPLE_FILE,
-    output_file: Union[str, Path] = TWEET_TRANSLATED_FILE,
-):
+def translate_tweets():
     """DeepL translate tweet sample (en -> zh)."""
     logger.info("=== Translating tweets en -> zh ===")
-    df = pd.read_parquet(tweet_sample_file)
+    df = pd.read_parquet(TWEET_SAMPLE_FILE)
     df["id"] = df["id"].astype(str)
     df = _translate_column(df, src_col="text", target_lang="ZH")
-    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(output_file, index=False)
-    logger.info(f"Saved {len(df)} translated tweets to {output_file}")
+    df.to_parquet(TWEET_TRANSLATED_FILE, index=False)
+    logger.info(f"Saved {len(df)} translated tweets to {TWEET_TRANSLATED_FILE}")
 
 
 def sample_translation(
     n: int = 10,
     seed: int = DEFAULT_SEED,
-    weibo_file: Union[str, Path] = WEIBO_TRANSLATED_FILE,
-    tweet_file: Union[str, Path] = TWEET_TRANSLATED_FILE,
-    output_file: Optional[Union[str, Path]] = None,
 ):
     """Spot-check translations: print n weibo (zh→en) and n tweet (en→zh) pairs,
     and save them as a CSV for review."""
     logger.info("=== Sampling translations for spot-check ===")
-    weibo_df = pd.read_parquet(weibo_file)
-    tweet_df = pd.read_parquet(tweet_file)
+    weibo_df = pd.read_parquet(WEIBO_TRANSLATED_FILE)
+    tweet_df = pd.read_parquet(TWEET_TRANSLATED_FILE)
 
     weibo_sample = weibo_df.sample(
         n=min(n, len(weibo_df)), random_state=seed
@@ -336,12 +349,8 @@ def sample_translation(
         ["sample", "post_id", "source_text", "translated_text", "original_opinion"]
     ]
 
-    output_path = Path(
-        output_file if output_file else CROSS_LINGUAL_PATH / "translation_sample.csv"
-    )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    combined.to_csv(output_path, index=False, encoding="utf-8-sig")
-    print(f"\nSaved spot-check to: {output_path}")
+    combined.to_csv(TRANSLATION_SAMPLE_CSV, index=False, encoding="utf-8-sig")
+    print(f"\nSaved spot-check to: {TRANSLATION_SAMPLE_CSV}")
 
 
 # ============================================================
@@ -349,19 +358,18 @@ def sample_translation(
 # ============================================================
 
 
-def submit_weibo_gpt(
-    translated_file: Union[str, Path] = WEIBO_TRANSLATED_FILE,
-):
+def submit_weibo_gpt(round: int = 1):
     """Build batch requests for translated weibo and submit to OpenAI."""
-    logger.info("=== Submitting GPT batch for translated weibo ===")
-    df = pd.read_parquet(translated_file)
+    paths = _round_paths(round)
+    logger.info(f"=== Submitting GPT batch for translated weibo [round {round}] ===")
+    df = pd.read_parquet(WEIBO_TRANSLATED_FILE)
     df["weibo_id"] = df["weibo_id"].astype(str)
 
     # Reuse the same hosted prompt + model that scored the original tweets,
     # so any opinion shift on the translated weibo isolates the language/translation
     # effect rather than introducing a new prompt as a confound. We also keep the
     # exact "Tweet text:" framing the prompt was tuned against.
-    with jsonlines.open(WEIBO_BATCH_REQUESTS, mode="w") as w:
+    with jsonlines.open(paths["weibo_batch_requests"], mode="w") as w:
         for _, row in df.iterrows():
             translated = str(row.get("translated_text", "") or "")
             w.write(
@@ -381,10 +389,10 @@ def submit_weibo_gpt(
                     },
                 }
             )
-    logger.info(f"Wrote {len(df)} requests to {WEIBO_BATCH_REQUESTS}")
+    logger.info(f"Wrote {len(df)} requests to {paths['weibo_batch_requests']}")
 
     client = OpenAI(api_key=OPENAI_API_KEY)
-    with open(WEIBO_BATCH_REQUESTS, "rb") as f:
+    with open(paths["weibo_batch_requests"], "rb") as f:
         uploaded = client.files.create(file=f, purpose="batch")
     batch = client.batches.create(
         input_file_id=uploaded.id,
@@ -392,44 +400,49 @@ def submit_weibo_gpt(
         completion_window="24h",
     )
     state = {
+        "round": round,
         "file_id": uploaded.id,
         "batch_id": batch.id,
         "status": "submitted",
         "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "request_count": len(df),
     }
-    with open(WEIBO_BATCH_STATE, "w") as f:
+    with open(paths["weibo_batch_state"], "w") as f:
         json.dump(state, f, indent=2)
     logger.info(f"Submitted batch {batch.id} (status={batch.status})")
-    print(f"Batch ID: {batch.id}")
+    print(f"Round {round} — Batch ID: {batch.id}")
 
 
-def retrieve_weibo_gpt():
-    """Poll the GPT batch and download results when ready."""
-    logger.info("=== Retrieving GPT batch ===")
-    if not WEIBO_BATCH_STATE.exists():
-        raise FileNotFoundError(f"No batch state at {WEIBO_BATCH_STATE}")
-    with open(WEIBO_BATCH_STATE) as f:
+def retrieve_weibo_gpt(round: int = 1) -> bool:
+    """Poll the GPT batch and download results when ready. Returns True iff completed."""
+    paths = _round_paths(round)
+    logger.info(f"=== Retrieving GPT batch [round {round}] ===")
+    if not paths["weibo_batch_state"].exists():
+        raise FileNotFoundError(f"No batch state at {paths['weibo_batch_state']}")
+    with open(paths["weibo_batch_state"]) as f:
         state = json.load(f)
 
     client = OpenAI(api_key=OPENAI_API_KEY)
     batch = client.batches.retrieve(state["batch_id"])
-    logger.info(f"Status: {batch.status}")
+    logger.info(f"Round {round} status: {batch.status}")
 
     if batch.status == "completed":
         content = client.files.content(batch.output_file_id)
-        with open(WEIBO_BATCH_RESULTS, "wb") as f:
+        with open(paths["weibo_batch_results"], "wb") as f:
             f.write(content.read())
         state["status"] = "retrieved"
         state["retrieved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        with open(WEIBO_BATCH_STATE, "w") as f:
+        with open(paths["weibo_batch_state"], "w") as f:
             json.dump(state, f, indent=2)
-        logger.info(f"Saved results to {WEIBO_BATCH_RESULTS}")
-        print("Done. Run parse_weibo_gpt next.")
+        logger.info(f"Saved results to {paths['weibo_batch_results']}")
+        print(f"Round {round}: done. Run parse_weibo_gpt next.")
+        return True
     elif batch.status == "failed":
-        logger.error(f"Batch failed: {batch}")
+        logger.error(f"Round {round} batch failed: {batch}")
+        return False
     else:
-        print(f"Not ready yet (status={batch.status}). Re-run later.")
+        print(f"Round {round}: not ready yet (status={batch.status}). Re-run later.")
+        return False
 
 
 def _opinion_to_str(x) -> Optional[str]:
@@ -445,16 +458,15 @@ def _opinion_to_str(x) -> Optional[str]:
     return str(x)
 
 
-def parse_weibo_gpt(
-    output_file: Union[str, Path] = WEIBO_REANALYZED_FILE,
-):
+def parse_weibo_gpt(round: int = 1):
     """Parse jsonl batch results into a parquet of (weibo_id, cross_lingual_opinion)."""
-    logger.info("=== Parsing GPT batch results ===")
-    if not WEIBO_BATCH_RESULTS.exists():
-        raise FileNotFoundError(f"Missing {WEIBO_BATCH_RESULTS}")
+    paths = _round_paths(round)
+    logger.info(f"=== Parsing GPT batch results [round {round}] ===")
+    if not paths["weibo_batch_results"].exists():
+        raise FileNotFoundError(f"Missing {paths['weibo_batch_results']}")
 
     rows = []
-    with jsonlines.open(WEIBO_BATCH_RESULTS) as r:
+    with jsonlines.open(paths["weibo_batch_results"]) as r:
         for item in r:
             weibo_id = item["custom_id"]
             opinion = None
@@ -475,9 +487,8 @@ def parse_weibo_gpt(
             )
 
     out_df = pd.DataFrame(rows)
-    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
-    out_df.to_parquet(output_file, index=False)
-    logger.info(f"Parsed {len(out_df)} results -> {output_file}")
+    out_df.to_parquet(paths["weibo_reanalyzed"], index=False)
+    logger.info(f"Parsed {len(out_df)} results -> {paths['weibo_reanalyzed']}")
     print(out_df["cross_lingual_opinion"].value_counts(dropna=False))
 
 
@@ -527,17 +538,17 @@ def _kimi_score_one(
 
 
 def analyze_tweet_kimi(
-    translated_file: Union[str, Path] = TWEET_TRANSLATED_FILE,
-    output_file: Union[str, Path] = TWEET_REANALYZED_FILE,
+    round: int = 1,
     delay: float = 0.1,
     max_retries: int = 3,
 ):
     """Score translated tweets with Kimi live API. Resumable: re-running skips done IDs."""
-    logger.info("=== Re-analyzing translated tweets with Kimi ===")
-    df = pd.read_parquet(translated_file)
+    paths = _round_paths(round)
+    logger.info(f"=== Re-analyzing translated tweets with Kimi [round {round}] ===")
+    df = pd.read_parquet(TWEET_TRANSLATED_FILE)
     df["id"] = df["id"].astype(str)
 
-    output_path = Path(output_file)
+    output_path = paths["tweet_reanalyzed"]
     if output_path.exists():
         prev = pd.read_parquet(output_path)
         done_ids = set(prev["tweet_id"].astype(str))
@@ -687,25 +698,23 @@ def _agreement_metrics(
     }
 
 
-def diff(
-    weibo_sample_file: Union[str, Path] = WEIBO_SAMPLE_FILE,
-    tweet_sample_file: Union[str, Path] = TWEET_SAMPLE_FILE,
-):
-    """Compute agreement between original and cross-lingual opinions; write report."""
-    logger.info("=== Diff analysis ===")
+def diff(round: int = 1):
+    """Compute agreement between original and cross-lingual opinions; write per-round report."""
+    paths = _round_paths(round)
+    logger.info(f"=== Diff analysis [round {round}] ===")
 
-    weibo_orig = pd.read_parquet(weibo_sample_file)
+    weibo_orig = pd.read_parquet(WEIBO_SAMPLE_FILE)
     weibo_orig["weibo_id"] = weibo_orig["weibo_id"].astype(str)
-    weibo_cross = pd.read_parquet(WEIBO_REANALYZED_FILE)
+    weibo_cross = pd.read_parquet(paths["weibo_reanalyzed"])
     weibo_cross["weibo_id"] = weibo_cross["weibo_id"].astype(str)
     weibo = weibo_orig.merge(weibo_cross, on="weibo_id", how="left")
     weibo_metrics = _agreement_metrics(
         weibo, "original_opinion", "cross_lingual_opinion", "weibo (zh→en, GPT)"
     )
 
-    tweet_orig = pd.read_parquet(tweet_sample_file)
+    tweet_orig = pd.read_parquet(TWEET_SAMPLE_FILE)
     tweet_orig["id"] = tweet_orig["id"].astype(str)
-    tweet_cross = pd.read_parquet(TWEET_REANALYZED_FILE)
+    tweet_cross = pd.read_parquet(paths["tweet_reanalyzed"])
     tweet_cross["tweet_id"] = tweet_cross["tweet_id"].astype(str)
     tweet = tweet_orig.merge(
         tweet_cross, left_on="id", right_on="tweet_id", how="left"
@@ -714,11 +723,10 @@ def diff(
         tweet, "original_opinion", "cross_lingual_opinion", "tweet (en→zh, Kimi)"
     )
 
-    report = {"weibo": weibo_metrics, "tweet": tweet_metrics}
-    report_file = CROSS_LINGUAL_PATH / "diff_report.json"
-    with open(report_file, "w", encoding="utf-8") as f:
+    report = {"round": round, "weibo": weibo_metrics, "tweet": tweet_metrics}
+    with open(paths["diff_report"], "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
-    logger.info(f"Saved {report_file}")
+    logger.info(f"Saved {paths['diff_report']}")
 
     weibo_out = weibo[
         ["weibo_id", "weibo_content", "original_opinion", "cross_lingual_opinion"]
@@ -735,11 +743,10 @@ def diff(
     tweet_out = tweet_out.rename(columns={"id": "post_id", "text": "original_text"})
 
     combined = pd.concat([weibo_out, tweet_out], ignore_index=True)
-    csv_file = CROSS_LINGUAL_PATH / "diff_per_row.csv"
-    combined.to_csv(csv_file, index=False, encoding="utf-8-sig")
-    logger.info(f"Saved {csv_file}")
+    combined.to_csv(paths["diff_per_row"], index=False, encoding="utf-8-sig")
+    logger.info(f"Saved {paths['diff_per_row']}")
 
-    print("\n=== Cross-lingual agreement ===")
+    print(f"\n=== Cross-lingual agreement (round {round}) ===")
     for m in (weibo_metrics, tweet_metrics):
         print(f"\n[{m['label']}]")
         n_total = m["n_total"]
@@ -778,6 +785,334 @@ def diff(
 
 
 # ============================================================
+# Multi-round aggregation + phase orchestrators
+# ============================================================
+
+
+def _summarize_metrics(metrics_list: list) -> dict:
+    """Mean + std (ddof=1) across rounds for the numeric fields in _agreement_metrics."""
+    out = {"n_rounds": len(metrics_list), "rounds": metrics_list, "summary": {}}
+    if not metrics_list:
+        return out
+
+    for k in (
+        "n_total",
+        "n_valid_pairs",
+        "exact_match",
+        "within_one",
+        "mean_abs_diff",
+        "mean_signed_diff_cross_minus_orig",
+        "quadratic_kappa",
+    ):
+        vals = [m[k] for m in metrics_list if k in m]
+        if not vals:
+            continue
+        arr = np.array(vals, dtype=float)
+        out["summary"][f"mean_{k}"] = float(arr.mean())
+        out["summary"][f"std_{k}"] = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
+
+    for side, key in [
+        ("cross_breakdown", "cross_cannot_tell_proportion"),
+        ("original_breakdown", "original_cannot_tell_proportion"),
+    ]:
+        vals = [m[side]["cannot_tell_proportion"] for m in metrics_list if side in m]
+        if not vals:
+            continue
+        arr = np.array(vals, dtype=float)
+        out["summary"][f"mean_{key}"] = float(arr.mean())
+        out["summary"][f"std_{key}"] = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
+
+    return out
+
+
+def _per_post_stability(
+    rounds_in: list[int],
+    reanalyzed_key: str,
+    id_col: str,
+    sample_path: Path,
+) -> dict:
+    """For each post, gather the per-round cross-lingual opinions and summarize
+    LLM stability (how often the analyzer gave the same label across rounds on
+    the SAME translated text). Also returns a per-post wide DataFrame with one
+    column per round, plus modal/all_agree/within_one_across_rounds columns.
+    """
+    sample_df = pd.read_parquet(sample_path)
+    sample_df[id_col] = sample_df[id_col].astype(str)
+
+    wide = sample_df[[id_col, "original_opinion"]].copy()
+    for r in rounds_in:
+        rdf = pd.read_parquet(_round_paths(r)[reanalyzed_key])
+        # Reanalyzed parquets use weibo_id (GPT) or tweet_id (Kimi)
+        join_col = "weibo_id" if reanalyzed_key == "weibo_reanalyzed" else "tweet_id"
+        rdf[join_col] = rdf[join_col].astype(str)
+        rdf = rdf.rename(columns={"cross_lingual_opinion": f"opinion_round_{r}"})
+        wide = wide.merge(
+            rdf[[join_col, f"opinion_round_{r}"]],
+            left_on=id_col,
+            right_on=join_col,
+            how="left",
+        )
+        if join_col != id_col:
+            wide = wide.drop(columns=[join_col])
+
+    round_cols = [f"opinion_round_{r}" for r in rounds_in]
+
+    def _row_stats(row):
+        ints = [_coerce_opinion(row[c]) for c in round_cols]
+        valid = [v for v in ints if v is not None]
+        n_runs = len(rounds_in)
+        n_valid = len(valid)
+        if n_valid == 0:
+            return pd.Series(
+                {
+                    "n_valid_runs": 0,
+                    "modal_opinion": None,
+                    "modal_count": 0,
+                    "all_agree": False,
+                    "within_one_across_rounds": False,
+                }
+            )
+        from collections import Counter
+        counter = Counter(valid)
+        mode_val, mode_cnt = counter.most_common(1)[0]
+        return pd.Series(
+            {
+                "n_valid_runs": n_valid,
+                "modal_opinion": mode_val,
+                "modal_count": mode_cnt,
+                "all_agree": (n_valid == n_runs) and len(set(valid)) == 1,
+                "within_one_across_rounds": (n_valid == n_runs)
+                and (max(valid) - min(valid)) <= 1,
+            }
+        )
+
+    stats = wide.apply(_row_stats, axis=1)
+    wide = pd.concat([wide, stats], axis=1)
+
+    n_total = len(wide)
+    n_runs = len(rounds_in)
+    n_all_valid = int((wide["n_valid_runs"] == n_runs).sum())
+    n_unanimous = int(wide["all_agree"].sum())
+    n_within_one = int(wide["within_one_across_rounds"].sum())
+
+    modal_diff_metrics = None
+    if n_all_valid > 0:
+        eligible = wide[wide["n_valid_runs"] == n_runs].copy()
+        eligible["cross_lingual_opinion"] = eligible["modal_opinion"].astype("Int64")
+        modal_diff_metrics = _agreement_metrics(
+            eligible,
+            "original_opinion",
+            "cross_lingual_opinion",
+            "modal-vote diff",
+        )
+
+    return {
+        "n_posts": int(n_total),
+        "n_rounds": n_runs,
+        "n_posts_all_runs_valid": n_all_valid,
+        "proportion_all_runs_valid": float(n_all_valid / n_total) if n_total else 0.0,
+        "n_posts_unanimous": n_unanimous,
+        "proportion_unanimous": float(n_unanimous / n_total) if n_total else 0.0,
+        "n_posts_within_one_across_rounds": n_within_one,
+        "proportion_within_one_across_rounds": (
+            float(n_within_one / n_total) if n_total else 0.0
+        ),
+        "mean_modal_count": float(wide["modal_count"].mean()),
+        "modal_vote_diff": modal_diff_metrics,
+        "_wide": wide,  # caller drops this before serializing
+    }
+
+
+def aggregate(rounds: int = DEFAULT_ROUNDS, start_round: int = 1):
+    """Pool per-round diffs into a mean ± std report and per-post LLM stability."""
+    logger.info(f"=== Aggregating rounds {start_round}..{rounds} ===")
+    weibo_per_round, tweet_per_round, diff_rows, found = [], [], [], []
+    for r in range(start_round, rounds + 1):
+        paths = _round_paths(r)
+        if not paths["diff_report"].exists():
+            logger.warning(f"Round {r}: missing {paths['diff_report']}, skipping")
+            continue
+        found.append(r)
+        with open(paths["diff_report"], encoding="utf-8") as f:
+            data = json.load(f)
+        weibo_per_round.append({"round": r, **data["weibo"]})
+        tweet_per_round.append({"round": r, **data["tweet"]})
+        if paths["diff_per_row"].exists():
+            df = pd.read_csv(paths["diff_per_row"])
+            df["round"] = r
+            diff_rows.append(df)
+
+    if not found:
+        logger.error("No diff reports found; cannot aggregate")
+        return
+
+    weibo_stab = _per_post_stability(
+        found, "weibo_reanalyzed", "weibo_id", WEIBO_SAMPLE_FILE
+    )
+    tweet_stab = _per_post_stability(
+        found, "tweet_reanalyzed", "id", TWEET_SAMPLE_FILE
+    )
+
+    aggregated = {
+        "n_rounds_requested": rounds - start_round + 1,
+        "rounds_with_reports": found,
+        "weibo": {
+            **_summarize_metrics(weibo_per_round),
+            "per_post_stability": {k: v for k, v in weibo_stab.items() if k != "_wide"},
+        },
+        "tweet": {
+            **_summarize_metrics(tweet_per_round),
+            "per_post_stability": {k: v for k, v in tweet_stab.items() if k != "_wide"},
+        },
+    }
+    with open(AGGREGATE_REPORT_FILE, "w", encoding="utf-8") as f:
+        json.dump(aggregated, f, indent=2, ensure_ascii=False)
+    logger.info(f"Saved {AGGREGATE_REPORT_FILE}")
+
+    weibo_wide = weibo_stab["_wide"].copy()
+    weibo_wide["sample"] = "weibo"
+    weibo_wide = weibo_wide.rename(columns={"weibo_id": "post_id"})
+    tweet_wide = tweet_stab["_wide"].copy()
+    tweet_wide["sample"] = "tweet"
+    tweet_wide = tweet_wide.rename(columns={"id": "post_id"})
+    pd.concat([weibo_wide, tweet_wide], ignore_index=True).to_csv(
+        AGGREGATE_PER_ROW_FILE, index=False, encoding="utf-8-sig"
+    )
+    logger.info(f"Saved {AGGREGATE_PER_ROW_FILE}")
+
+    print(f"\n=== Aggregate cross-lingual agreement ({len(found)} rounds: {found}) ===")
+    for side in ("weibo", "tweet"):
+        s = aggregated[side]
+        sm = s["summary"]
+        st = s["per_post_stability"]
+        print(f"\n[{side}]")
+        if not sm:
+            print("  (no rounds)")
+            continue
+
+        def _line(label: str, mean_key: str, signed: bool = False):
+            mean = sm.get(mean_key)
+            std = sm.get("std_" + mean_key[5:])
+            if mean is None:
+                return
+            std_str = f" ± {std:.3f}" if std is not None else ""
+            fmt = f"{mean:+.3f}" if signed else f"{mean:.3f}"
+            print(f"  {label:<37} = {fmt}{std_str}")
+
+        print("  -- per-round diff (mean ± std across rounds) --")
+        _line("n_valid_pairs (mean)", "mean_n_valid_pairs")
+        _line("cross cannot_tell proportion", "mean_cross_cannot_tell_proportion")
+        _line("original cannot_tell proportion", "mean_original_cannot_tell_proportion")
+        _line("exact_match", "mean_exact_match")
+        _line("within ±1", "mean_within_one")
+        _line("mean |diff|", "mean_mean_abs_diff")
+        _line(
+            "mean (cross-orig)",
+            "mean_mean_signed_diff_cross_minus_orig",
+            signed=True,
+        )
+        _line("quadratic kappa", "mean_quadratic_kappa")
+
+        print("  -- LLM stability across rounds (same translated text) --")
+        print(
+            f"  posts with all {st['n_rounds']} runs valid     "
+            f"= {st['n_posts_all_runs_valid']:>4} / {st['n_posts']} "
+            f"({st['proportion_all_runs_valid'] * 100:.1f}%)"
+        )
+        print(
+            f"  posts with unanimous label across runs = "
+            f"{st['n_posts_unanimous']:>4} / {st['n_posts']} "
+            f"({st['proportion_unanimous'] * 100:.1f}%)"
+        )
+        print(
+            f"  posts within ±1 across all runs        = "
+            f"{st['n_posts_within_one_across_rounds']:>4} / {st['n_posts']} "
+            f"({st['proportion_within_one_across_rounds'] * 100:.1f}%)"
+        )
+        print(
+            f"  mean modal-count (out of {st['n_rounds']})            "
+            f"= {st['mean_modal_count']:.2f}"
+        )
+        mvd = st.get("modal_vote_diff")
+        if mvd and "exact_match" in mvd:
+            print(
+                f"  modal-vote vs original: exact={mvd['exact_match']:.3f}, "
+                f"signed_diff={mvd['mean_signed_diff_cross_minus_orig']:+.3f}, "
+                f"kappa={mvd['quadratic_kappa']:.3f}"
+            )
+
+
+def run_scoring(rounds: int = DEFAULT_ROUNDS, start_round: int = 1):
+    """For each round in [start_round..rounds]: submit a GPT batch on the
+    translated weibo, run Kimi on the translated tweets. Sample + translation
+    must already exist (one-shot, top-level). Stops after Kimi finishes — wait
+    for GPT batches to complete, then run `finalize`.
+    """
+    for f in (WEIBO_TRANSLATED_FILE, TWEET_TRANSLATED_FILE):
+        if not f.exists():
+            raise FileNotFoundError(
+                f"Missing {f}. Run sample_tweets/translate_weibo/translate_tweets first."
+            )
+
+    for r in range(start_round, rounds + 1):
+        logger.info(f"\n========== ROUND {r} (scoring) ==========")
+        paths = _round_paths(r)
+
+        if paths["weibo_batch_state"].exists():
+            logger.info(f"Round {r}: GPT batch already submitted, skipping")
+        else:
+            submit_weibo_gpt(round=r)
+
+        # analyze_tweet_kimi is internally resumable
+        analyze_tweet_kimi(round=r)
+
+    print("\n" + "=" * 60)
+    print(f"Scoring done for rounds {start_round}..{rounds}.")
+    print("GPT batches are queued; once they complete, run:")
+    print(f"  python cross_lingual_validation.py finalize --rounds {rounds}")
+    print("=" * 60)
+
+
+def finalize(rounds: int = DEFAULT_ROUNDS, start_round: int = 1):
+    """Retrieve GPT batches, parse, diff per round, then aggregate. Idempotent:
+    rounds whose batches aren't ready yet are skipped — re-run later."""
+    completed = []
+    for r in range(start_round, rounds + 1):
+        logger.info(f"\n========== ROUND {r} (finalize) ==========")
+        paths = _round_paths(r)
+
+        if not paths["weibo_batch_results"].exists():
+            try:
+                ready = retrieve_weibo_gpt(round=r)
+            except Exception as e:
+                logger.warning(f"Round {r}: retrieve_weibo_gpt error: {e}")
+                ready = False
+            if not ready:
+                logger.warning(f"Round {r}: batch not ready, skipping")
+                continue
+
+        if not paths["weibo_reanalyzed"].exists():
+            parse_weibo_gpt(round=r)
+
+        if not paths["tweet_reanalyzed"].exists():
+            logger.warning(
+                f"Round {r}: tweet_reanalyzed missing (Kimi never finished?), "
+                "skipping diff"
+            )
+            continue
+
+        diff(round=r)
+        completed.append(r)
+
+    if not completed:
+        print("\nNo rounds had completed batches; re-run `finalize` later.")
+        return
+
+    print(f"\nFinalized rounds: {completed}. Aggregating...")
+    aggregate(rounds=rounds, start_round=start_round)
+
+
+# ============================================================
 # CLI
 # ============================================================
 
@@ -793,5 +1128,8 @@ if __name__ == "__main__":
             "parse_weibo_gpt": parse_weibo_gpt,
             "analyze_tweet_kimi": analyze_tweet_kimi,
             "diff": diff,
+            "aggregate": aggregate,
+            "run_scoring": run_scoring,
+            "finalize": finalize,
         }
     )
