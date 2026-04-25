@@ -255,7 +255,7 @@ def translate_weibo(
     logger.info("=== Translating weibo zh -> en ===")
     df = pd.read_parquet(weibo_sample_file)
     df["weibo_id"] = df["weibo_id"].astype(str)
-    df = _translate_column(df, src_col="weibo_content", target_lang="EN")
+    df = _translate_column(df, src_col="weibo_content", target_lang="EN-US")
     Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output_file, index=False)
     logger.info(f"Saved {len(df)} translated weibo to {output_file}")
