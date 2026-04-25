@@ -88,9 +88,10 @@ OPENAI_MODEL = "gpt-4.1"  # Model to use for sentiment analysis
 SENTIMENT_SAMPLE_SIZE = 1000  # Number of tweets to sample for sentiment analysis
 
 # ---------- Cross-lingual sentiment validation (cross_lingual_validation.py) ----------
-# DeepL — translate weibo zh->en and tweets en->zh
+# DeepL — translate weibo zh->en and tweets en->zh.
+# Uses the official `deepl` Python SDK; free vs pro endpoint is auto-selected
+# from the auth-key suffix (free keys end with ":fx").
 DEEPL_API_KEY = "YOUR_DEEPL_API_KEY_HERE"
-DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"  # use https://api.deepl.com/v2/translate for paid plan
 
 # Kimi (Moonshot) — re-analyze translated tweets in Chinese
 KIMI_API_KEY = "YOUR_KIMI_API_KEY_HERE"

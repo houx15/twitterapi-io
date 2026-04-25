@@ -26,13 +26,14 @@ This holds the prompt content constant across languages so any score shift can b
 Open `config.py` and add the keys below (template lives in `config.date.example.py`):
 
 ```python
-DEEPL_API_KEY = "..."
-DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"   # or api.deepl.com for pro
+DEEPL_API_KEY = "..."   # free vs pro endpoint auto-selected from key suffix
 KIMI_API_KEY = "..."
 KIMI_BASE_URL = "https://api.moonshot.cn/v1"
 KIMI_MODEL = "kimi-k2-0905-preview"
 CROSS_LINGUAL_DIR = "sentiment_results/cross_lingual"
 ```
+
+Translation goes through the official [`deepl`](https://pypi.org/project/deepl/) Python SDK (added to `requirements.txt`). The SDK auto-selects the free vs pro endpoint based on the key, so no URL config is needed.
 
 The reanalysis of translated weibo reuses `BATCH_PROMPT_ID` / `BATCH_PROMPT_VERSION` / `BATCH_MODEL` already in `config.py` — no changes there.
 

@@ -19,8 +19,7 @@ Workflow:
     diff                   - agreement metrics + per-row CSV report
 
 Required additions to config.py (see config.date.example.py for keys):
-    DEEPL_API_KEY
-    DEEPL_API_URL              (free or pro endpoint)
+    DEEPL_API_KEY              (free vs pro endpoint auto-selected from key)
     KIMI_API_KEY
     KIMI_BASE_URL
     KIMI_MODEL
@@ -39,11 +38,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
+import deepl
 import fire
 import jsonlines
 import numpy as np
 import pandas as pd
-import requests
 from openai import OpenAI
 from tqdm import tqdm
 
@@ -51,7 +50,6 @@ from config import (
     OPENAI_API_KEY,
     SENTIMENT_OUTPUT_DIR,
     DEEPL_API_KEY,
-    DEEPL_API_URL,
     KIMI_API_KEY,
     KIMI_BASE_URL,
     KIMI_MODEL,
@@ -206,6 +204,18 @@ def _save_deepl_cache(cache: dict):
         json.dump(cache, f, ensure_ascii=False)
 
 
+_deepl_client: Optional[deepl.DeepLClient] = None
+
+
+def _get_deepl_client() -> deepl.DeepLClient:
+    """Lazily build the DeepL client. Free vs Pro endpoint is auto-selected
+    from the auth key suffix (`:fx` for free)."""
+    global _deepl_client
+    if _deepl_client is None:
+        _deepl_client = deepl.DeepLClient(DEEPL_API_KEY)
+    return _deepl_client
+
+
 def _deepl_translate(text: str, target_lang: str, cache: dict) -> str:
     """Translate one piece of text via DeepL with on-disk cache."""
     if not text.strip():
@@ -214,17 +224,8 @@ def _deepl_translate(text: str, target_lang: str, cache: dict) -> str:
     if key in cache:
         return cache[key]
 
-    response = requests.post(
-        DEEPL_API_URL,
-        data={
-            "auth_key": DEEPL_API_KEY,
-            "text": text,
-            "target_lang": target_lang,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    translated = response.json()["translations"][0]["text"]
+    result = _get_deepl_client().translate_text(text, target_lang=target_lang)
+    translated = result.text
     cache[key] = translated
     return translated
 
