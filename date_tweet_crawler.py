@@ -5,16 +5,25 @@ This script crawls tweets based on specific keywords and date ranges.
 It supports test mode and formal crawl mode using the fire package.
 
 Example usage:
-    # Test mode
-    python tweet_crawler.py test
+    # Test mode with default config
+    python date_tweet_crawler.py test
 
-    # Formal crawl mode
-    python tweet_crawler.py crawl
+    # Test mode with specific topic config
+    python date_tweet_crawler.py test --topic abortion
+
+    # Formal crawl mode with default config
+    python date_tweet_crawler.py crawl
+
+    # Formal crawl mode with specific topic config
+    python date_tweet_crawler.py crawl --topic abortion
 """
 
 import requests
 import json
 import logging
+import importlib
+import importlib.util
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -23,38 +32,75 @@ import fire
 import time
 import random
 
-# Import configuration
-from config import (
-    API_URL,
-    API_KEY,
-    TWEETS_PER_DATE,
-    TWEETS_PER_PAGE,
-    CALLS_PER_DATE,
-    STATE_FILE,
-    LOG_FILE,
-    DATA_DIR,
-    TEST_OUTPUT_FILE,
-    KEYWORDS,
-    START_DATE,
-    END_DATE,
-    TARGET_DAYS,
-    LANGUAGE,
-    QUERY_TYPE,
-    REQUEST_DELAY,
-)
-
 # Retry configuration
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 REQUEST_TIMEOUT = 30
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
-)
 logger = logging.getLogger(__name__)
+
+
+def load_config(config_name: str = "config"):
+    """
+    动态加载配置模块。
+    
+    Args:
+        config_name: 配置模块名称或配置文件路径 (default: "config")
+                    可以是:
+                    - 模块名: "config", "config_custom", 等
+                    - 文件路径: "config.xxx.py", "configs/xxx.py", "./configs/config.xxx.py", 等
+                    - 绝对路径: "/path/to/config.xxx.py"
+    
+    Returns:
+        配置模块对象
+    """
+    # 检查是否是文件路径（包含 .py 或 /）
+    if config_name.endswith('.py') or '/' in config_name or '\\' in config_name:
+        # 从文件路径加载
+        config_path = Path(config_name)
+        if not config_path.is_absolute():
+            # 如果是相对路径，尝试相对于脚本目录查找
+            script_dir = Path(__file__).parent
+            config_path = script_dir / config_name
+        
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        
+        # 基于文件路径生成唯一的模块名
+        module_name = f"config_{config_path.stem}_{hash(str(config_path))}"
+        
+        # 从文件加载模块
+        spec = importlib.util.spec_from_file_location(module_name, config_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to create spec for config file: {config_path}")
+        
+        config_module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = config_module
+        spec.loader.exec_module(config_module)
+        
+        logger.info(f"Loaded configuration from file: {config_path}")
+        return config_module
+    else:
+        # 作为模块名加载
+        try:
+            config_module = importlib.import_module(config_name)
+            logger.info(f"Loaded configuration from module: {config_name}")
+            return config_module
+        except ImportError as e:
+            logger.error(f"Failed to import config module '{config_name}': {e}")
+            raise
+
+
+def setup_logging(config):
+    """使用配置模块中的配置设置日志。"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(config.LOG_FILE),
+            logging.StreamHandler()
+        ],
+    )
 
 
 def append_tweets(output_file: Path, tweets: List[Dict[str, Any]]):
@@ -67,18 +113,18 @@ def append_tweets(output_file: Path, tweets: List[Dict[str, Any]]):
             f.write("\n")
 
 
-def generate_dates() -> List[str]:
+def generate_dates(config) -> List[str]:
     """
     Generate dates from END_DATE to START_DATE in reverse order.
     Returns dates in format YYYY-MM-DD for days specified in TARGET_DAYS.
     """
     dates = []
-    start_date = datetime.strptime(START_DATE, "%Y-%m-%d")
-    end_date = datetime.strptime(END_DATE, "%Y-%m-%d")
+    start_date = datetime.strptime(config.START_DATE, "%Y-%m-%d")
+    end_date = datetime.strptime(config.END_DATE, "%Y-%m-%d")
 
     current = end_date
     while current >= start_date:
-        if current.day in TARGET_DAYS:
+        if current.day in config.TARGET_DAYS:
             dates.append(current.strftime("%Y-%m-%d"))
 
         # Move to previous day
@@ -90,7 +136,7 @@ def generate_dates() -> List[str]:
 def build_query(
     keywords: List[str],
     date: str,
-    language: str = LANGUAGE,
+    config,
     max_id: Optional[str] = None,
     until_time_str: Optional[str] = None,
 ) -> str:
@@ -100,12 +146,14 @@ def build_query(
     Args:
         keywords: List of keywords to search for
         date: Date in YYYY-MM-DD format
-        language: Language code (default: en)
+        config: Configuration module
         max_id: Optional max_id to continue pagination beyond initial limit
+        until_time_str: Optional until time string
 
     Returns:
         Query string formatted for Twitter API
     """
+    language = config.LANGUAGE
     date_obj = datetime.strptime(date, "%Y-%m-%d")
     since_date = date_obj.strftime("%Y-%m-%d")
     until_date = (date_obj + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -134,22 +182,23 @@ def build_query(
     return query
 
 
-def load_state(state_file: str = STATE_FILE) -> Dict[str, Any]:
+def load_state(config) -> Dict[str, Any]:
     """Load the state file to resume crawling."""
-    state_path = Path(state_file)
+    state_path = Path(config.STATE_FILE)
     if state_path.exists():
         with open(state_path, "r") as f:
             return json.load(f)
     return {}
 
 
-def save_state(state: Dict[str, Any], state_file: str = STATE_FILE):
+def save_state(state: Dict[str, Any], config):
     """Save the current state to file."""
-    with open(state_file, "w") as f:
+    with open(config.STATE_FILE, "w") as f:
         json.dump(state, indent=2, fp=f)
 
 
 def crawl_tweets_for_date(
+    config,
     date: str,
     max_calls: int = None,
     test_mode: bool = False,
@@ -165,6 +214,7 @@ def crawl_tweets_for_date(
     Crawl tweets for a specific date.
 
     Args:
+        config: Configuration module
         date: Date in YYYY-MM-DD format
         max_calls: Maximum number of API calls (None for unlimited)
         test_mode: If True, only make 1 API call for testing
@@ -179,8 +229,8 @@ def crawl_tweets_for_date(
     Returns:
         Dictionary with crawl results
     """
-    base_query = build_query(KEYWORDS, date)
-    headers = {"X-API-Key": API_KEY}
+    base_query = build_query(config.KEYWORDS, date, config)
+    headers = {"X-API-Key": config.API_KEY}
 
     until_time_str = until_time_str or ""
     cursor = start_cursor or ""
@@ -188,7 +238,7 @@ def crawl_tweets_for_date(
     previous_max_id = None
     previous_cursor = None
     calls_made = start_calls
-    max_calls = 1 if test_mode else (max_calls or CALLS_PER_DATE)
+    max_calls = 1 if test_mode else (max_calls or config.CALLS_PER_DATE)
     completed = False
     last_batch: List[Dict[str, Any]] = []
     max_id_retry_count = 0  # 跟踪 max_id 未推进的重试次数
@@ -214,19 +264,20 @@ def crawl_tweets_for_date(
             try:
                 query = base_query
 
-                params = {"queryType": QUERY_TYPE, "query": query}
+                params = {"queryType": config.QUERY_TYPE, "query": query}
 
                 if cursor:
                     params["cursor"] = cursor
                 elif max_id:
                     if max_id_retry_count >= 2:
                         query = build_query(
-                            KEYWORDS,
+                            config.KEYWORDS,
                             date,
+                            config,
                             max_id=str(int(max_id) - (1000000000000 * max_id_retry_count)),
                         )
                     else:
-                        query = build_query(KEYWORDS, date, max_id=max_id)
+                        query = build_query(config.KEYWORDS, date, config, max_id=max_id)
                     params["query"] = query
                 # elif max_id and max_id_retry_count > 0:
                 #     query = build_query(KEYWORDS, date, until_time_str=until_time_str)
@@ -238,7 +289,7 @@ def crawl_tweets_for_date(
                 while attempt < MAX_RETRIES:
                     try:
                         response = requests.get(
-                            API_URL,
+                            config.API_URL,
                             headers=headers,
                             params=params,
                             timeout=REQUEST_TIMEOUT,
@@ -308,8 +359,15 @@ def crawl_tweets_for_date(
                     created_at_date = datetime.strptime(
                         created_at, "%a %b %d %H:%M:%S +0000 %Y"
                     )
+                    valid_last_tweet_id = False
+                    if not last_tweet_id:
+                        valid_last_tweet_id = False
+                    elif not max_id:
+                        valid_last_tweet_id = True
+                    elif int(last_tweet_id) < int(max_id):
+                        valid_last_tweet_id = True
 
-                    if created_at_date.date() == datetime.strptime(date, "%Y-%m-%d").date() and int(last_tweet_id) < int(max_id):
+                    if created_at_date.date() == datetime.strptime(date, "%Y-%m-%d").date() and valid_last_tweet_id:
                         max_id = last_tweet_id
                         until_time_str = created_at
                         logger.info(f"Updated max_id for {date}: {max_id}")
@@ -401,13 +459,13 @@ def crawl_tweets_for_date(
                         "max_id": max_id,
                         "until_time_str": until_time_str,
                     }
-                    save_state(state)
+                    save_state(state, config)
 
                 if completed:
                     break
 
                 # Small delay to avoid rate limiting
-                time.sleep(REQUEST_DELAY)
+                time.sleep(config.REQUEST_DELAY)
 
             except requests.exceptions.RequestException as e:
                 logger.error(f"Request error for {date}: {e}")
@@ -432,14 +490,20 @@ def crawl_tweets_for_date(
     }
 
 
-def test():
+def test(topic: str = "config"):
     """
     Test mode: Crawl 1 request each for 2024-03-01 and 2025-03-20.
     Save results to test.jsonl (one tweet per line).
+    
+    Args:
+        topic: Topic to crawl (default: "config"), used to load config file
     """
+    config_name = f"configs/{topic}.date.py" if not topic.endswith('.py') else topic
+    config = load_config(config_name)
+    setup_logging(config)
     logger.info("=== Starting TEST mode ===")
 
-    test_file = Path(TEST_OUTPUT_FILE)
+    test_file = Path(config.TEST_OUTPUT_FILE)
     test_file.parent.mkdir(parents=True, exist_ok=True)
 
     test_dates = ["2024-03-01", "2025-03-20"]
@@ -448,12 +512,12 @@ def test():
     for date in test_dates:
         logger.info(f"Testing date: {date}")
         result = crawl_tweets_for_date(
-            date, test_mode=True, output_file=test_file, total_written=0
+            config, date, test_mode=True, output_file=test_file, total_written=0
         )
         test_results[date] = {
             "total_tweets": result["total_tweets"],
             "calls_made": result["calls_made"],
-            "query": build_query(KEYWORDS, date),
+            "query": build_query(config.KEYWORDS, date, config),
             "tweets": result["tweets"],
         }
         logger.info(
@@ -472,25 +536,31 @@ def test():
         print(f"  Query: {result['query']}")
 
 
-def crawl():
+def crawl(topic: str = "config"):
     """
     Formal crawl mode: Crawl all dates with full configuration.
     Saves each date to a JSONL file (one tweet per line) and persists after each response.
     Maintains state file for resuming interrupted crawls.
+    
+    Args:
+        topic: Topic to crawl (default: "config"), used to load config file
     """
+    config_name = f"configs/{topic}.date.py" if not topic.endswith('.py') else topic
+    config = load_config(config_name)
+    setup_logging(config)
     logger.info("=== Starting FORMAL CRAWL mode ===")
 
     # Generate all dates
-    dates = generate_dates()
+    dates = generate_dates(config)
     logger.info(f"Total dates to crawl: {len(dates)}")
     logger.info(f"Date range: {dates[-1]} to {dates[0]}")
 
     # Load existing state
-    state = load_state()
+    state = load_state(config)
     logger.info(f"Loaded state with {len(state)} entries")
 
     # Create data directory
-    data_dir = Path(DATA_DIR)
+    data_dir = Path(config.DATA_DIR)
     data_dir.mkdir(exist_ok=True)
 
     # Overall progress bar
@@ -520,6 +590,7 @@ def crawl():
             total_written = state.get(date, {}).get("total_tweets", 0)
 
             result = crawl_tweets_for_date(
+                config,
                 date,
                 start_cursor=resume_cursor,
                 start_calls=resume_calls,
@@ -543,7 +614,7 @@ def crawl():
                     "max_id": result.get("max_id"),
                     "until_time_str": result.get("until_time_str"),
                 }
-                save_state(state)
+                save_state(state, config)
 
             if result["finished"]:
                 overall_pbar.update(1)
@@ -559,15 +630,21 @@ def crawl():
     print(f"Total API calls made: {total_calls}")
 
 
-def crawl_twenty_rounds():
+def crawl_twenty_rounds(topic: str = "config"):
+    config_name = f"configs/{topic}.date.py" if not topic.endswith('.py') else topic
+    config = load_config(config_name)
+    setup_logging(config)
+    
     for i in range(100):
-        crawl()
+        crawl(topic)
         sleep_time = random.randint(10, 60)
         time.sleep(sleep_time)
         logger.info(f"Crawled {i+1} rounds, sleeping for {sleep_time} seconds")
 
-def count_total_tweets():
-    state_data = load_state()
+def count_total_tweets(topic: str = "config"):
+    config_name = f"configs/{topic}.date.py" if not topic.endswith('.py') else topic
+    config = load_config(config_name)
+    state_data = load_state(config)
     total_tweets = 0
 
     for date, data in state_data.items():

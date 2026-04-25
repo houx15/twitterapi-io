@@ -699,6 +699,9 @@ def calculate_daily_average(location: Optional[str] = None):
     )
     logger.info(f"Merged data: {len(merged_df)} rows")
 
+    # print how many unique userids are in the merged_df
+    print(f"Number of unique userids: {len(merged_df['author.id'].unique())}")
+
     # Step 2.5: filter by location if location is not None
     if location == "us":
         us_userids_path = Path(USER_LOCATION_FILTER_OUTPUT_DIR) / "us_userids.json"
@@ -707,6 +710,13 @@ def calculate_daily_average(location: Optional[str] = None):
         with open(us_userids_path, "r") as f:
             us_userids = json.load(f)
         merged_df = merged_df[merged_df["author.id"].isin(us_userids)]
+    
+        # print how many unique userids are in the merged_df after filtering by location
+        print(f"Number of unique userids after filtering by location: {len(merged_df['author.id'].unique())}")
+        # print how many tweets
+        print(f"Number of tweets after filtering by location: {len(merged_df)}")
+        # print opinion value counts
+        print(f"Opinion value counts: {merged_df['opinion'].value_counts()}")
     
     # Step 3: Convert createdAt to datetime
     logger.info("Converting createdAt to datetime...")
@@ -727,6 +737,22 @@ def calculate_daily_average(location: Optional[str] = None):
     
     # Extract date (yyyy-mm-dd format)
     merged_df["date"] = merged_df["createdAt_dt"].dt.date
+
+    # print sampled 100 rows of text & opinion to a txt file for particular dates
+    dates_to_analyze = ["2024-04-20", "2024-06-01", "2024-08-10"]
+    for date_str in dates_to_analyze:
+        date_df = merged_df[merged_df["date"].astype(str) == date_str]
+        date_df = date_df.sort_values("opinion")
+        # first 100 rows
+        sampled_df = date_df.head(100)
+        sampled_df = sampled_df[["text", "opinion"]]
+        # sort by opinion, small to large
+        # sampled_df = sampled_df.sort_values("opinion")
+        # append to a temporary file
+        with open(Path(SENTIMENT_OUTPUT_DIR) / f"temp_{date_str}.txt", "a") as f:
+            for index, row in sampled_df.iterrows():
+                f.write(f"{row['text']}\n{row['opinion']}\n")
+        print(f"Sampled {len(sampled_df)} rows for {date_str}")
     
     # Step 5: Calculate daily metrics using aggregation
     logger.info("Calculating daily metrics...")
