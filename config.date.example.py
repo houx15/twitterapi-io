@@ -86,3 +86,18 @@ REQUEST_DELAY = 0.5  # Seconds to wait between API requests
 OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"  # Replace with your OpenAI API key
 OPENAI_MODEL = "gpt-4.1"  # Model to use for sentiment analysis
 SENTIMENT_SAMPLE_SIZE = 1000  # Number of tweets to sample for sentiment analysis
+
+# ---------- Cross-lingual sentiment validation (cross_lingual_validation.py) ----------
+# DeepL — translate weibo zh->en and tweets en->zh
+DEEPL_API_KEY = "YOUR_DEEPL_API_KEY_HERE"
+DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"  # use https://api.deepl.com/v2/translate for paid plan
+
+# Kimi (Moonshot) — re-analyze translated tweets in Chinese
+KIMI_API_KEY = "YOUR_KIMI_API_KEY_HERE"
+KIMI_BASE_URL = "https://api.moonshot.cn/v1"
+KIMI_MODEL = "kimi-k2-0905-preview"
+
+# Output dir for cross-lingual validation. The GPT reanalysis of translated
+# weibo reuses BATCH_PROMPT_ID / BATCH_PROMPT_VERSION / BATCH_MODEL from above
+# (same prompt that scored the original tweets).
+CROSS_LINGUAL_DIR = "sentiment_results/cross_lingual"
