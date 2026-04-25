@@ -99,13 +99,17 @@ python cross_lingual_validation.py diff
 
 `diff_report.json` has two top-level keys: `weibo` (zh→en, GPT) and `tweet` (en→zh, Kimi). Each contains:
 
-- `n_total` / `n_valid` — pairs available vs pairs with valid integer opinion on both sides
-- `exact_match` — fraction with identical labels
+- `n_total` — pairs available after the merge
+- `original_breakdown` / `cross_breakdown` — `{valid_int, cannot_tell, invalid, cannot_tell_proportion}` per side. Reports how often each analyzer punted vs returned a usable label.
+- `n_valid_pairs` — rows where **both** sides returned a valid integer; only these feed the diff metrics below
+- `exact_match` — fraction (of `n_valid_pairs`) with identical labels
 - `within_one` — fraction within ±1 on the ordinal scale
 - `mean_abs_diff` — mean |original − cross|
 - `mean_signed_diff_cross_minus_orig` — direction of bias. Positive = cross-lingual analyzer scored more positively than the original.
 - `quadratic_kappa` — Cohen's κ adjusted for the ordinal nature of the labels
 - `confusion_matrix` — 5×5 of original (rows) vs cross-lingual (cols)
+
+The `cannot_tell_proportion` is worth reporting alongside the agreement metrics — a high cross-side `cannot_tell` rate means the cross-lingual analyzer found the translated text too ambiguous to score, which is its own kind of disagreement (separate from giving the wrong number).
 
 Three numbers worth quoting in the response to the reviewer: `exact_match`, `mean_signed_diff_cross_minus_orig`, `quadratic_kappa`. If signed diff is small (|·| < 0.2) and κ > 0.6 on both samples, you have a clean defense.
 

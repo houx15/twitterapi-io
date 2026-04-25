@@ -432,6 +432,19 @@ def retrieve_weibo_gpt():
         print(f"Not ready yet (status={batch.status}). Re-run later.")
 
 
+def _opinion_to_str(x) -> Optional[str]:
+    """Stringify the opinion field uniformly. The prompt allows both integer
+    labels (-2..2) and the literal "cannot tell", so writing a mixed-dtype
+    column blows up pyarrow. Reading back through `_coerce_opinion` recovers
+    the int / None for the metrics step.
+    """
+    if x is None:
+        return None
+    if isinstance(x, float) and pd.isna(x):
+        return None
+    return str(x)
+
+
 def parse_weibo_gpt(
     output_file: Union[str, Path] = WEIBO_REANALYZED_FILE,
 ):
@@ -457,7 +470,9 @@ def parse_weibo_gpt(
                         break
             except Exception as e:
                 logger.warning(f"Parse failed for {weibo_id}: {e}")
-            rows.append({"weibo_id": weibo_id, "cross_lingual_opinion": opinion})
+            rows.append(
+                {"weibo_id": weibo_id, "cross_lingual_opinion": _opinion_to_str(opinion)}
+            )
 
     out_df = pd.DataFrame(rows)
     Path(output_file).parent.mkdir(parents=True, exist_ok=True)
@@ -541,7 +556,9 @@ def analyze_tweet_kimi(
         translated = str(row.get("translated_text", "") or "")
         created_at = row.get("createdAt")
         opinion = _kimi_score_one(client, translated, created_at, max_retries)
-        rows.append({"tweet_id": tweet_id, "cross_lingual_opinion": opinion})
+        rows.append(
+            {"tweet_id": tweet_id, "cross_lingual_opinion": _opinion_to_str(opinion)}
+        )
         done_ids.add(tweet_id)
 
         if len(rows) % 20 == 0:
@@ -557,19 +574,31 @@ def analyze_tweet_kimi(
 # ============================================================
 
 
-def _coerce_opinion(x) -> Optional[int]:
+def _classify_opinion(x) -> str:
+    """Classify a raw opinion value as 'valid_int', 'cannot_tell', or 'invalid'.
+
+    Diff metrics are only computed on rows where both sides are 'valid_int'.
+    The 'cannot_tell' bucket is reported separately as a proportion so we can
+    distinguish "the analyzer punted" from "the analyzer disagreed".
+    """
     if x is None:
-        return None
+        return "invalid"
     if isinstance(x, float) and pd.isna(x):
-        return None
-    s = str(x).strip()
-    if s in ("", "cannot tell", "None", "nan", "NaN"):
-        return None
+        return "invalid"
+    s = str(x).strip().lower()
+    if s == "cannot tell":
+        return "cannot_tell"
     try:
         v = int(float(s))
-        return v if v in (-2, -1, 0, 1, 2) else None
+        return "valid_int" if v in (-2, -1, 0, 1, 2) else "invalid"
     except ValueError:
+        return "invalid"
+
+
+def _coerce_opinion(x) -> Optional[int]:
+    if _classify_opinion(x) != "valid_int":
         return None
+    return int(float(str(x).strip()))
 
 
 def _quadratic_kappa(y1, y2, classes=(-2, -1, 0, 1, 2)) -> float:
@@ -593,21 +622,44 @@ def _quadratic_kappa(y1, y2, classes=(-2, -1, 0, 1, 2)) -> float:
     return float(1 - (W * O).sum() / den)
 
 
+def _breakdown(df: pd.DataFrame, col: str, n_total: int) -> dict:
+    counts = df[col].value_counts().to_dict()
+    return {
+        "valid_int": int(counts.get("valid_int", 0)),
+        "cannot_tell": int(counts.get("cannot_tell", 0)),
+        "invalid": int(counts.get("invalid", 0)),
+        "cannot_tell_proportion": (
+            float(counts.get("cannot_tell", 0) / n_total) if n_total else 0.0
+        ),
+    }
+
+
 def _agreement_metrics(
     df: pd.DataFrame, original_col: str, cross_col: str, label: str
 ) -> dict:
     df = df.copy()
-    df["o"] = df[original_col].apply(_coerce_opinion)
-    df["c"] = df[cross_col].apply(_coerce_opinion)
-    valid = df[df["o"].notna() & df["c"].notna()].copy()
+    df["o_cls"] = df[original_col].apply(_classify_opinion)
+    df["c_cls"] = df[cross_col].apply(_classify_opinion)
 
     n_total = len(df)
-    n_valid = len(valid)
-    if n_valid == 0:
-        return {"label": label, "n_total": n_total, "n_valid": 0, "note": "no valid pairs"}
+    original_breakdown = _breakdown(df, "o_cls", n_total)
+    cross_breakdown = _breakdown(df, "c_cls", n_total)
 
-    valid["o"] = valid["o"].astype(int)
-    valid["c"] = valid["c"].astype(int)
+    valid = df[(df["o_cls"] == "valid_int") & (df["c_cls"] == "valid_int")].copy()
+    n_valid_pairs = len(valid)
+
+    base = {
+        "label": label,
+        "n_total": n_total,
+        "original_breakdown": original_breakdown,
+        "cross_breakdown": cross_breakdown,
+        "n_valid_pairs": n_valid_pairs,
+    }
+    if n_valid_pairs == 0:
+        return {**base, "note": "no valid pairs — cannot compute diff metrics"}
+
+    valid["o"] = valid[original_col].apply(_coerce_opinion).astype(int)
+    valid["c"] = valid[cross_col].apply(_coerce_opinion).astype(int)
 
     exact = (valid["o"] == valid["c"]).mean()
     within_one = ((valid["o"] - valid["c"]).abs() <= 1).mean()
@@ -625,9 +677,7 @@ def _agreement_metrics(
     )
 
     return {
-        "label": label,
-        "n_total": n_total,
-        "n_valid": n_valid,
+        **base,
         "exact_match": float(exact),
         "within_one": float(within_one),
         "mean_abs_diff": float(mean_abs),
@@ -692,15 +742,39 @@ def diff(
     print("\n=== Cross-lingual agreement ===")
     for m in (weibo_metrics, tweet_metrics):
         print(f"\n[{m['label']}]")
-        if m.get("n_valid", 0) == 0:
-            print("  no valid pairs")
+        n_total = m["n_total"]
+        ob = m["original_breakdown"]
+        cb = m["cross_breakdown"]
+
+        def _pct(n: int) -> str:
+            return f"{n / n_total * 100:.1f}%" if n_total else "0.0%"
+
+        print(f"  n_total                     = {n_total}")
+        print(
+            f"  original cannot_tell        = {ob['cannot_tell']:>4} ({_pct(ob['cannot_tell'])})"
+        )
+        print(
+            f"  original other invalid      = {ob['invalid']:>4} ({_pct(ob['invalid'])})"
+        )
+        print(
+            f"  cross cannot_tell           = {cb['cannot_tell']:>4} ({_pct(cb['cannot_tell'])})"
+        )
+        print(
+            f"  cross other invalid         = {cb['invalid']:>4} ({_pct(cb['invalid'])})"
+        )
+        print(
+            f"  pairs used for diff metrics = {m['n_valid_pairs']:>4} ({_pct(m['n_valid_pairs'])})"
+        )
+        if m["n_valid_pairs"] == 0:
+            print("  no valid pairs — cannot compute diff metrics")
             continue
-        print(f"  n_valid           = {m['n_valid']} / {m['n_total']}")
-        print(f"  exact_match       = {m['exact_match']:.3f}")
-        print(f"  within ±1         = {m['within_one']:.3f}")
-        print(f"  mean |diff|       = {m['mean_abs_diff']:.3f}")
-        print(f"  mean (cross-orig) = {m['mean_signed_diff_cross_minus_orig']:+.3f}")
-        print(f"  quadratic kappa   = {m['quadratic_kappa']:.3f}")
+        print(f"  exact_match                 = {m['exact_match']:.3f}")
+        print(f"  within ±1                   = {m['within_one']:.3f}")
+        print(f"  mean |diff|                 = {m['mean_abs_diff']:.3f}")
+        print(
+            f"  mean (cross-orig)           = {m['mean_signed_diff_cross_minus_orig']:+.3f}"
+        )
+        print(f"  quadratic kappa             = {m['quadratic_kappa']:.3f}")
 
 
 # ============================================================
