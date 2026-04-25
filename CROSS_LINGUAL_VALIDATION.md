@@ -67,6 +67,10 @@ python cross_lingual_validation.py sample_tweets
 python cross_lingual_validation.py translate_weibo     # zh → en
 python cross_lingual_validation.py translate_tweets    # en → zh
 
+# 2b. Optional: spot-check 10 weibo + 10 tweet translations before re-scoring
+python cross_lingual_validation.py sample_translation              # default n=10
+python cross_lingual_validation.py sample_translation --n 20       # or larger
+
 # 3. Re-score translated weibo with GPT batch (Responses API, hosted prompt)
 python cross_lingual_validation.py submit_weibo_gpt
 # poll until status=completed (re-run as needed):
@@ -84,6 +88,7 @@ python cross_lingual_validation.py diff
 
 - **`sample_tweets`** — reads `sentiment_results/batch_results.parquet` and joins to the date-filtered tweet parquets via `load_parquet_files_filtered_by_date`. Proportional-stratified by class.
 - **`translate_*`** — caches every (target_lang, text) → translation in `deepl_cache.json`, persisted every 25 calls. Safe to interrupt and re-run.
+- **`sample_translation`** — prints `n` random pairs from each direction (default 10) and writes `translation_sample.csv` to `CROSS_LINGUAL_DIR`. Use this to eyeball whether DeepL handled AI keywords / sarcasm / quoted text reasonably before committing API spend on the re-scoring steps.
 - **`submit_weibo_gpt`** — uploads requests, creates batch, persists `{file_id, batch_id, status}` to `weibo_en_batch_state.json`.
 - **`retrieve_weibo_gpt`** — idempotent. Re-run until status=`completed`; results land in `weibo_en_results.jsonl`.
 - **`parse_weibo_gpt`** — extracts `opinion` from each Responses API output and writes `weibo_reanalyzed_gpt.parquet`.
@@ -122,6 +127,7 @@ tweet_translation_sample.parquet     # produced by sample_tweets
 weibo_translated.parquet             # zh→en
 tweet_translated.parquet             # en→zh
 deepl_cache.json                     # DeepL cache
+translation_sample.csv               # 10+10 spot-check pairs (sample_translation)
 weibo_en_requests.jsonl              # GPT batch input
 weibo_en_results.jsonl               # GPT batch raw output
 weibo_en_batch_state.json            # {file_id, batch_id, status}

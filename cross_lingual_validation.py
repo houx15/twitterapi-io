@@ -12,6 +12,7 @@ Workflow:
     sample_tweets          - stratified-by-opinion sample of 200 tweets
     translate_weibo        - DeepL zh -> en for the weibo sample
     translate_tweets       - DeepL en -> zh for the tweet sample
+    sample_translation     - spot-check 10 weibo + 10 tweet translations
     submit_weibo_gpt       - submit GPT-5-mini batch on translated weibo
     retrieve_weibo_gpt     - poll & download batch results
     parse_weibo_gpt        - parse jsonl results into parquet
@@ -273,6 +274,74 @@ def translate_tweets(
     Path(output_file).parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output_file, index=False)
     logger.info(f"Saved {len(df)} translated tweets to {output_file}")
+
+
+def sample_translation(
+    n: int = 10,
+    seed: int = DEFAULT_SEED,
+    weibo_file: Union[str, Path] = WEIBO_TRANSLATED_FILE,
+    tweet_file: Union[str, Path] = TWEET_TRANSLATED_FILE,
+    output_file: Optional[Union[str, Path]] = None,
+):
+    """Spot-check translations: print n weibo (zh→en) and n tweet (en→zh) pairs,
+    and save them as a CSV for review."""
+    logger.info("=== Sampling translations for spot-check ===")
+    weibo_df = pd.read_parquet(weibo_file)
+    tweet_df = pd.read_parquet(tweet_file)
+
+    weibo_sample = weibo_df.sample(
+        n=min(n, len(weibo_df)), random_state=seed
+    ).reset_index(drop=True)
+    tweet_sample = tweet_df.sample(
+        n=min(n, len(tweet_df)), random_state=seed
+    ).reset_index(drop=True)
+
+    print("\n" + "=" * 80)
+    print(f"WEIBO (zh → en)  — {len(weibo_sample)} samples")
+    print("=" * 80)
+    for i, row in weibo_sample.iterrows():
+        print(
+            f"\n--- {i + 1}/{len(weibo_sample)}  "
+            f"weibo_id={row['weibo_id']}  opinion={row['original_opinion']} ---"
+        )
+        print(f"ZH: {row['weibo_content']}")
+        print(f"EN: {row['translated_text']}")
+
+    print("\n" + "=" * 80)
+    print(f"TWEET (en → zh)  — {len(tweet_sample)} samples")
+    print("=" * 80)
+    for i, row in tweet_sample.iterrows():
+        print(
+            f"\n--- {i + 1}/{len(tweet_sample)}  "
+            f"tweet_id={row['id']}  opinion={row['original_opinion']} ---"
+        )
+        print(f"EN: {row['text']}")
+        print(f"ZH: {row['translated_text']}")
+
+    weibo_out = weibo_sample[
+        ["weibo_id", "weibo_content", "translated_text", "original_opinion"]
+    ].copy()
+    weibo_out["sample"] = "weibo (zh→en)"
+    weibo_out = weibo_out.rename(
+        columns={"weibo_id": "post_id", "weibo_content": "source_text"}
+    )
+
+    tweet_out = tweet_sample[
+        ["id", "text", "translated_text", "original_opinion"]
+    ].copy()
+    tweet_out["sample"] = "tweet (en→zh)"
+    tweet_out = tweet_out.rename(columns={"id": "post_id", "text": "source_text"})
+
+    combined = pd.concat([weibo_out, tweet_out], ignore_index=True)[
+        ["sample", "post_id", "source_text", "translated_text", "original_opinion"]
+    ]
+
+    output_path = Path(
+        output_file if output_file else CROSS_LINGUAL_PATH / "translation_sample.csv"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    combined.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"\nSaved spot-check to: {output_path}")
 
 
 # ============================================================
@@ -644,6 +713,7 @@ if __name__ == "__main__":
             "sample_tweets": sample_tweets,
             "translate_weibo": translate_weibo,
             "translate_tweets": translate_tweets,
+            "sample_translation": sample_translation,
             "submit_weibo_gpt": submit_weibo_gpt,
             "retrieve_weibo_gpt": retrieve_weibo_gpt,
             "parse_weibo_gpt": parse_weibo_gpt,
