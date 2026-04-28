@@ -5,6 +5,7 @@ This script generates three PDF figures comparing avg_opinion, weighted_opinion,
 and user_avg_opinion between Weibo and Twitter data.
 """
 
+import fire
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -266,5 +267,5 @@ def main(use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_COR
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)
 
