@@ -33,6 +33,13 @@ FIGURES_DIR.mkdir(exist_ok=True)
 # Sliding window settings
 WINDOW_SIZE = 3  # Number of days for moving average (can be adjusted)
 
+# Cross-lingual bias correction. The cross-lingual validation (see
+# CROSS_LINGUAL_RESULTS.md) found Kimi-Chinese rates ~0.03 higher than
+# GPT-English on the same content (modal-vote signed bias). Subtracting
+# CORRECTION_FACTOR from the Weibo line makes the two scales comparable.
+APPLY_CORRECTION = False
+CORRECTION_FACTOR = 0.03  # subtracted from Weibo values when APPLY_CORRECTION=True
+
 
 def apply_sliding_window(df, metric_name, window_size=WINDOW_SIZE):
     """
@@ -80,10 +87,10 @@ def load_data():
     return weibo_df, twitter_df
 
 
-def plot_metric(ax, weibo_df, twitter_df, metric_name, ylabel, use_smoothing=True, window_size=WINDOW_SIZE):
+def plot_metric(ax, weibo_df, twitter_df, metric_name, ylabel, use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_CORRECTION, correction_factor=CORRECTION_FACTOR):
     """
     Plot a single metric comparison.
-    
+
     Args:
         ax: Matplotlib axes object
         weibo_df: Weibo DataFrame
@@ -92,6 +99,8 @@ def plot_metric(ax, weibo_df, twitter_df, metric_name, ylabel, use_smoothing=Tru
         ylabel: Y-axis label
         use_smoothing: Whether to apply sliding window smoothing
         window_size: Size of sliding window for smoothing
+        apply_correction: Whether to subtract correction_factor from Weibo values
+        correction_factor: Constant subtracted from Weibo values when apply_correction=True
     """
     # Apply sliding window smoothing if requested
     if use_smoothing:
@@ -103,6 +112,9 @@ def plot_metric(ax, weibo_df, twitter_df, metric_name, ylabel, use_smoothing=Tru
     else:
         weibo_values = weibo_df[metric_name]
         twitter_values = twitter_df[metric_name]
+
+    if apply_correction:
+        weibo_values = weibo_values - correction_factor
     
     # Plot lines
     ax.plot(
@@ -195,53 +207,61 @@ def plot_metric(ax, weibo_df, twitter_df, metric_name, ylabel, use_smoothing=Tru
     ax.grid(True, alpha=0.3, linestyle='--')
 
 
-def main(use_smoothing=True, window_size=WINDOW_SIZE):
+def main(use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_CORRECTION, correction_factor=CORRECTION_FACTOR):
     """
     Main function to generate all plots.
-    
+
     Args:
         use_smoothing: Whether to apply sliding window smoothing (default: True)
         window_size: Size of sliding window for smoothing in days (default: 3)
+        apply_correction: Whether to subtract correction_factor from Weibo values (default: APPLY_CORRECTION)
+        correction_factor: Constant subtracted from Weibo values when apply_correction=True
     """
     print("Loading data...")
     weibo_df, twitter_df = load_data()
-    
+
     print(f"Weibo data: {len(weibo_df)} dates")
     print(f"Twitter data: {len(twitter_df)} dates")
-    
+
     if use_smoothing:
         print(f"Applying sliding window smoothing with window size: {window_size} days")
-    
+
+    if apply_correction:
+        print(f"Applying cross-lingual correction: Weibo values shifted by -{correction_factor}")
+
     # Get today's date for filename
     today_str = datetime.now().strftime("%Y-%m-%d")
-    
+    correction_tag = f"_corrected_weibo_minus{correction_factor:.2f}" if apply_correction else "_uncorrected"
+
     # Create individual plots
     metrics = [
         ("avg_opinion", "Average Opinion"),
         ("weighted_opinion", "LikeCount Weighted Opinion"),
         ("user_avg_opinion", "User-level Average Opinion")
     ]
-    
+
     for metric_name, ylabel in metrics:
         fig, ax = plt.subplots(figsize=(10, 6))
         plot_metric(
-            ax, 
-            weibo_df, 
-            twitter_df, 
-            metric_name, 
+            ax,
+            weibo_df,
+            twitter_df,
+            metric_name,
             ylabel,
             use_smoothing=use_smoothing,
-            window_size=window_size
+            window_size=window_size,
+            apply_correction=apply_correction,
+            correction_factor=correction_factor,
         )
         # Use subplots_adjust to ensure consistent plot area size across all plots
         # This ensures all plots have the same actual plotting area regardless of label lengths
         plt.subplots_adjust(left=0.12, right=0.95, top=0.95, bottom=0.15)
-        
-        output_path = FIGURES_DIR / f"{metric_name}_comparison_{today_str}.pdf"
+
+        output_path = FIGURES_DIR / f"{metric_name}_comparison{correction_tag}_{today_str}.pdf"
         fig.savefig(output_path, format="pdf", bbox_inches='tight')
         print(f"Individual plot saved to: {output_path}")
         plt.close(fig)
-    
+
     print("\nAll plots generated successfully!")
 
 

@@ -46,7 +46,7 @@ Denominator is the full 200-post sample (conservative — a post with any `canno
 | Metric | Weibo | Tweet |
 |---|---|---|
 | exact_match | 0.658 | 0.742 |
-| signed_diff (cross − orig) | −0.027 | +0.030 |
+| **signed_diff (cross − orig)** | **−0.027** | **+0.030** |
 | quadratic kappa | 0.804 | 0.920 |
 
 ## Interpretation
