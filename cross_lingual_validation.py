@@ -10,7 +10,7 @@ original sentiment scores. For each sample post we:
 
 Workflow:
     Single-shot (one sample, one translation):
-        sample_tweets          - stratified-by-opinion sample of 200 tweets
+        sample_tweets          - stratified-by-opinion sample of 1000 tweets
         translate_weibo        - DeepL zh -> en for the weibo sample
         translate_tweets       - DeepL en -> zh for the tweet sample
         sample_translation     - spot-check 10 weibo + 10 tweet translations
@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 CROSS_LINGUAL_PATH = Path(CROSS_LINGUAL_DIR)
 CROSS_LINGUAL_PATH.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_SAMPLE_SIZE = 200
+DEFAULT_SAMPLE_SIZE = 1000
 DEFAULT_SEED = 42
 DEFAULT_ROUNDS = 5
 
