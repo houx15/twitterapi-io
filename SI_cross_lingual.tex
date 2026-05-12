@@ -1,0 +1,187 @@
+% =====================================================================
+% Supplementary Information: Cross-lingual sentiment validation
+% =====================================================================
+%
+% Compile-time dependencies (add to preamble if not already present):
+%   \usepackage{booktabs}
+%   \usepackage{siunitx}
+%   \usepackage{amsmath}
+%   \usepackage{graphicx}
+%
+% Drop this subsection into the SI \section{Supplementary Information}.
+
+\subsection{Cross-lingual sentiment validation and correction}
+\label{si:cross-lingual}
+
+\subsubsection{Motivation: why two different scoring models}
+
+The Weibo (China) and Twitter (USA) opinion time series in the main text
+were originally produced by two different large-language-model analyzers:
+Weibo posts (Chinese) were scored by \textbf{Kimi-K2} with a
+Chinese-language prompt, while tweets (English) were scored by
+\textbf{GPT-5} with an English-language prompt. This split was driven by a
+data-access constraint rather than a methodological preference: the Weibo
+collection pipeline runs on a server inside mainland China, where direct
+calls to the OpenAI API are not permitted. Routing every Weibo post out of
+that environment for re-scoring was infeasible at the scale of our
+corpus. Conversely, the Twitter pipeline lives outside China and can
+freely call GPT-5. At the time of the original analysis, Kimi-K2 and
+GPT-5 were within roughly one percentage point of each other on
+publicly reported reasoning and instruction-following benchmarks, so the
+choice was made to use whichever model was natively available on each
+side.
+
+A reviewer pointed out that even when two models perform comparably on
+generic benchmarks, they may apply systematically different sentiment
+scales to the same text. We therefore conducted a cross-lingual,
+cross-model validation experiment to (i) estimate the residual offset
+between the two analyzers when both score the \emph{same content}, and
+(ii) apply that estimate as an additive correction to the Weibo line in
+the comparison figures.
+
+\subsubsection{Experimental design}
+
+We instantiated a symmetric two-arm experiment, one per platform:
+
+\paragraph{Sampling.} From each platform we drew a stratified random
+sample of $n = 1000$ posts (seed fixed; proportional stratification on
+the original opinion class). Weibo posts retained their original
+Chinese text; tweets retained their original English text.
+
+\paragraph{Machine translation.} Each sample was translated once
+through the DeepL API: Weibo posts zh$\rightarrow$en, tweets
+en$\rightarrow$zh. Translations were cached locally so that all
+subsequent rounds operated on identical translated text and any
+variance came from the language model alone, not from sampling or
+translation noise.
+
+\paragraph{Cross-lingual re-scoring.} The translated text on each side
+was then re-scored by the \emph{other} analyzer:
+translated Weibo (now in English) was re-scored by GPT-5 with the
+English prompt used for tweets; translated tweets (now in Chinese) were
+re-scored by Kimi-K2 with the Chinese prompt used for Weibos. To
+distinguish model sampling noise from systematic bias, the re-scoring
+was repeated $R = 5$ independent rounds with identical inputs.
+
+\paragraph{Per-round signed difference.} For each round $r \in
+\{1,\dots,5\}$ and each platform $p \in \{\text{weibo},
+\text{tweet}\}$, we restricted to posts that returned a valid integer
+score on both the original and the cross-lingual side, then computed
+the mean signed difference
+\begin{equation*}
+\Delta^{(p)}_r \;=\; \frac{1}{|\mathcal{V}^{(p)}_r|} \sum_{i \in
+\mathcal{V}^{(p)}_r} \bigl(\,o^{\text{cross}}_{i,r} -
+o^{\text{orig}}_i\bigr),
+\end{equation*}
+where $o^{\text{orig}}_i$ is the post's original score and
+$o^{\text{cross}}_{i,r}$ is its round-$r$ cross-lingual re-score, both
+on the five-point opinion scale $\{-2,-1,0,1,2\}$.
+
+\subsubsection{Correction factor}
+
+The two arms provide independent estimates of the same Kimi-Chinese
+vs.\ GPT-English scoring offset, but they are measured on different
+corpora. Because the quantity we ultimately correct is the
+\emph{Weibo} time series, we use the Weibo-arm estimate directly: it is
+the offset measured on the exact content domain that the correction is
+applied to. It is also the larger (more conservative) of the two arms
+in absolute value, so this choice does not understate the residual
+bias.
+
+Concretely, we define the round-averaged Weibo-arm offset
+\begin{equation}
+\widehat{\Delta}^{(\text{weibo})} \;=\; \frac{1}{R} \sum_{r=1}^{R}
+\Delta^{(\text{weibo})}_r,
+\label{eq:correction}
+\end{equation}
+which directly estimates the mean of $\text{GPT-en}(x) -
+\text{Kimi-zh}(x)$ across Weibo posts $x$. We then add this offset
+(with its sign) to every value of the original Weibo opinion time
+series before plotting:
+\begin{equation}
+y^{\text{corrected}}_{\text{weibo}}(t) \;=\; y^{\text{orig}}_{\text{weibo}}(t)
++ \widehat{\Delta}^{(\text{weibo})}.
+\label{eq:apply}
+\end{equation}
+Interpreted operationally,
+Equation~\eqref{eq:apply} translates the Kimi-Chinese-scored Weibo line
+onto the GPT-English scale used for the Twitter line, making the two
+series directly comparable. The correction is a vertical shift only:
+the rolling-mean smoothing in the comparison figure is applied to the
+raw daily values first, and the correction is applied as a final
+additive offset, so temporal dynamics are unchanged.
+
+The Twitter-arm estimate
+$\widehat{\Delta}^{(\text{tweet})} = +0.0464$ is reported in
+Table~\ref{tab:cross-lingual-rounds} as an independent cross-check:
+both arms agree in direction (Kimi-Chinese assigns slightly more
+positive opinion scores than GPT-English on the same translated
+content), confirming that the offset is genuine rather than an
+artifact of one arm's content domain.
+
+\subsubsection{Results}
+
+Table~\ref{tab:cross-lingual-rounds} reports, for each of the five
+rounds, the number of posts that yielded a valid score on both sides,
+and the per-round signed differences $\Delta^{(\text{weibo})}_r$ and
+$\Delta^{(\text{tweet})}_r$.
+
+\begin{table}[h]
+\centering
+\caption{Cross-lingual signed sentiment differences per round.
+$\Delta^{(\text{weibo})}_r$: GPT-English re-scores of translated Weibo
+posts minus their original Kimi-Chinese scores. $\Delta^{(\text{tweet})}_r$:
+Kimi-Chinese re-scores of translated tweets minus their original
+GPT-English scores. $n^{(p)}_r$ is the count of valid
+original--cross-lingual score pairs (out of $1000$ sampled posts per
+platform) in round $r$. The applied correction is the round-averaged
+Weibo-arm value, shown in bold.}
+\label{tab:cross-lingual-rounds}
+\begin{tabular}{c S[table-format=4.0] S[table-format=4.0]
+                  S[table-format=+1.4] S[table-format=+1.4]}
+\toprule
+Round &
+{$n^{(\text{weibo})}_r$} &
+{$n^{(\text{tweet})}_r$} &
+{$\Delta^{(\text{weibo})}_r$} &
+{$\Delta^{(\text{tweet})}_r$} \\
+\midrule
+1 & 848 & 753 & -0.0814 & +0.0438 \\
+2 & 857 & 767 & -0.0782 & +0.0495 \\
+3 & 849 & 755 & -0.0789 & +0.0477 \\
+4 & 856 & 752 & -0.0537 & +0.0439 \\
+5 & 840 & 763 & -0.0690 & +0.0472 \\
+\midrule
+\textbf{Mean} & \textbf{850.0} & \textbf{758.0} &
+\textbf{-0.0722} & {+0.0464} \\
+SD (across rounds) & {6.9} & {6.6} & {0.0114} & {0.0025} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Both arms produce small differences in absolute value ($|\Delta| <
+0.10$ on the five-point scale) that are remarkably stable across rounds
+(SDs of $0.011$ and $0.003$ respectively), indicating that the
+disagreement between the two analyzers is a systematic offset rather
+than per-call sampling noise. The applied correction is
+$\widehat{\Delta}^{(\text{weibo})} = -0.0722$ on the $[-2,+2]$ opinion
+scale.
+
+\subsubsection{Producing the corrected figure}
+
+The comparison plot script (\texttt{plot.py}) exposes the correction as
+a CLI flag. The uncorrected and corrected figures are produced as
+follows:
+
+\begin{verbatim}
+# Uncorrected (Weibo line on Kimi-Chinese scale)
+python plot.py --apply_correction False
+
+# Corrected (Weibo line shifted onto GPT-English scale)
+python plot.py --apply_correction True --correction_factor -0.0722
+\end{verbatim}
+
+The filename of the saved PDF encodes the correction state
+(\texttt{\_uncorrected} or \texttt{\_corrected\_weibo-0.0722}), so the
+two variants can be regenerated and compared without overwriting each
+other.

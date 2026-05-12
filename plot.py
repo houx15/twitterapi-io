@@ -34,12 +34,14 @@ FIGURES_DIR.mkdir(exist_ok=True)
 # Sliding window settings
 WINDOW_SIZE = 3  # Number of days for moving average (can be adjusted)
 
-# Cross-lingual bias correction. The cross-lingual validation (see
-# CROSS_LINGUAL_RESULTS.md) found Kimi-Chinese rates ~0.03 higher than
-# GPT-English on the same content (modal-vote signed bias). Subtracting
-# CORRECTION_FACTOR from the Weibo line makes the two scales comparable.
+# Cross-lingual bias correction. Computed from the 5-round cross-lingual
+# validation (1000 weibo posts; see SI_cross_lingual.tex). Per round:
+#   delta_weibo_r = mean( GPT_en(translated_weibo) − Kimi_zh(weibo) )
+# CORRECTION_FACTOR is the mean of delta_weibo_r across rounds and is ADDED to
+# the original (Kimi-Chinese-scored) Weibo line, mapping it onto the
+# GPT-English scale used for the Twitter line.
 APPLY_CORRECTION = False
-CORRECTION_FACTOR = 0.03  # subtracted from Weibo values when APPLY_CORRECTION=True
+CORRECTION_FACTOR = -0.0722  # added to Weibo values when APPLY_CORRECTION=True
 
 
 def apply_sliding_window(df, metric_name, window_size=WINDOW_SIZE):
@@ -100,8 +102,8 @@ def plot_metric(ax, weibo_df, twitter_df, metric_name, ylabel, use_smoothing=Tru
         ylabel: Y-axis label
         use_smoothing: Whether to apply sliding window smoothing
         window_size: Size of sliding window for smoothing
-        apply_correction: Whether to subtract correction_factor from Weibo values
-        correction_factor: Constant subtracted from Weibo values when apply_correction=True
+        apply_correction: Whether to add correction_factor to Weibo values
+        correction_factor: Signed offset added to Weibo values when apply_correction=True
     """
     # Apply sliding window smoothing if requested
     if use_smoothing:
@@ -115,7 +117,7 @@ def plot_metric(ax, weibo_df, twitter_df, metric_name, ylabel, use_smoothing=Tru
         twitter_values = twitter_df[metric_name]
 
     if apply_correction:
-        weibo_values = weibo_values - correction_factor
+        weibo_values = weibo_values + correction_factor
     
     # Plot lines
     ax.plot(
@@ -215,8 +217,8 @@ def main(use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_COR
     Args:
         use_smoothing: Whether to apply sliding window smoothing (default: True)
         window_size: Size of sliding window for smoothing in days (default: 3)
-        apply_correction: Whether to subtract correction_factor from Weibo values (default: APPLY_CORRECTION)
-        correction_factor: Constant subtracted from Weibo values when apply_correction=True
+        apply_correction: Whether to add correction_factor to Weibo values (default: APPLY_CORRECTION)
+        correction_factor: Signed offset added to Weibo values when apply_correction=True
     """
     print("Loading data...")
     weibo_df, twitter_df = load_data()
@@ -228,11 +230,11 @@ def main(use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_COR
         print(f"Applying sliding window smoothing with window size: {window_size} days")
 
     if apply_correction:
-        print(f"Applying cross-lingual correction: Weibo values shifted by -{correction_factor}")
+        print(f"Applying cross-lingual correction: Weibo values shifted by {correction_factor:+.4f}")
 
     # Get today's date for filename
     today_str = datetime.now().strftime("%Y-%m-%d")
-    correction_tag = f"_corrected_weibo_minus{correction_factor:.2f}" if apply_correction else "_uncorrected"
+    correction_tag = f"_corrected_weibo{correction_factor:+.4f}" if apply_correction else "_uncorrected"
 
     # Create individual plots
     metrics = [
