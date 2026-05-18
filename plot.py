@@ -242,6 +242,7 @@ def main(use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_COR
     # Get today's date for filename
     today_str = datetime.now().strftime("%Y-%m-%d")
     correction_tag = f"_corrected_weibo{correction_factor:+.4f}" if apply_correction else "_uncorrected"
+    smoothing_tag = f"_smoothed{window_size}d" if use_smoothing else "_raw"
 
     # Create individual plots
     metrics = [
@@ -267,7 +268,7 @@ def main(use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_COR
         # This ensures all plots have the same actual plotting area regardless of label lengths
         plt.subplots_adjust(left=0.12, right=0.95, top=0.95, bottom=0.15)
 
-        output_path = FIGURES_DIR / f"{metric_name}_comparison{correction_tag}_{today_str}.pdf"
+        output_path = FIGURES_DIR / f"{metric_name}_comparison{correction_tag}{smoothing_tag}_{today_str}.pdf"
         fig.savefig(output_path, format="pdf", bbox_inches='tight')
         print(f"Individual plot saved to: {output_path}")
         plt.close(fig)
