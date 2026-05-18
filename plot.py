@@ -209,6 +209,13 @@ def plot_metric(ax, weibo_df, twitter_df, metric_name, ylabel, use_smoothing=Tru
     # Add grid for better readability
     ax.grid(True, alpha=0.3, linestyle='--')
 
+    # Return the plotted points (post-smoothing, post-correction) so the
+    # caller can persist them alongside the figure.
+    weibo_points = pd.DataFrame({"date": weibo_df["date"].values, "weibo": weibo_values.values})
+    twitter_points = pd.DataFrame({"date": twitter_df["date"].values, "twitter": twitter_values.values})
+    points = pd.merge(weibo_points, twitter_points, on="date", how="outer").sort_values("date").reset_index(drop=True)
+    return points
+
 
 def main(use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_CORRECTION, correction_factor=CORRECTION_FACTOR):
     """
@@ -245,7 +252,7 @@ def main(use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_COR
 
     for metric_name, ylabel in metrics:
         fig, ax = plt.subplots(figsize=(10, 6))
-        plot_metric(
+        points = plot_metric(
             ax,
             weibo_df,
             twitter_df,
@@ -264,6 +271,10 @@ def main(use_smoothing=True, window_size=WINDOW_SIZE, apply_correction=APPLY_COR
         fig.savefig(output_path, format="pdf", bbox_inches='tight')
         print(f"Individual plot saved to: {output_path}")
         plt.close(fig)
+
+        csv_path = output_path.with_suffix(".csv")
+        points.to_csv(csv_path, index=False)
+        print(f"Plotted points saved to: {csv_path}")
 
     print("\nAll plots generated successfully!")
 
