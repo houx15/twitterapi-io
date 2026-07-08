@@ -23,6 +23,10 @@ mkdir -p "$PARTS" "$SCRATCH_TMP" logs
 # Deterministic tarball list; pick this task's tarball by array index.
 mapfile -t TARBALLS < <(ls -1 "$NET_DIR"/*.tar.gz | sort)
 N=${#TARBALLS[@]}
+if [ "$N" -eq 0 ]; then
+  echo "ERROR: no *.tar.gz found under NET_DIR=$NET_DIR" >&2
+  exit 1
+fi
 echo "Total tarballs: $N ; array index: ${SLURM_ARRAY_TASK_ID}"
 if [ "${SLURM_ARRAY_TASK_ID}" -ge "$N" ]; then
   echo "Index beyond tarball count; nothing to do."

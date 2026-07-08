@@ -65,3 +65,29 @@ def test_ignores_pickle_done_and_dirs(tmp_path):
     lines, stats = _run(p)
     assert lines == ["42"]
     assert stats["streamed"] == 1
+
+
+def test_mid_member_read_error_does_not_fuse(tmp_path, monkeypatch):
+    # If a member fails mid-read after writing partial bytes, those bytes must
+    # not fuse with the next member's first ID (e.g. "45" + "678" -> "45678").
+    p = _make_tarball(tmp_path, [
+        ("aaa-following.csv", b"unused"),
+        ("bbb-following.csv", b"678\n"),
+    ])
+    calls = {"n": 0}
+    real_copy = en._copy_member
+
+    def flaky_copy(file_obj, out):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            out.write(b"45")  # partial, no trailing newline
+            raise OSError("simulated mid-member read failure")
+        return real_copy(file_obj, out)
+
+    monkeypatch.setattr(en, "_copy_member", flaky_copy)
+    out = __import__("io").BytesIO()
+    stats = en.stream_tarball(p, out)
+    lines = [ln for ln in out.getvalue().decode().split("\n") if ln != ""]
+    assert "45678" not in lines        # must NOT fuse across the failed member
+    assert "678" in lines
+    assert stats["skipped"] >= 1

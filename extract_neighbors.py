@@ -82,6 +82,9 @@ def stream_tarball(tarball_path, out) -> dict:
                 if streamed % GC_EVERY == 0:
                     logger.info("%s: %d members, %d bytes", tarball_path, streamed, total_bytes)
             except Exception as e:  # one bad member must not abort a multi-hour job
+                # Close any partially-written line so a truncated member cannot
+                # fuse with the next member's first ID (e.g. "45" + "678" -> "45678").
+                out.write(b"\n")
                 skipped += 1
                 logger.warning("skip member in %s: %s", tarball_path, e)
             member = tar.next()

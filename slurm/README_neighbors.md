@@ -11,8 +11,8 @@ export NET_DIR=/scratch/network/COVID3/data-network
 ls -1 "$NET_DIR"/*.tar.gz | wc -l          # number of tarballs (= array size)
 # Peek at member names in one archive (fast, no full unzip):
 python - <<'PY'
-import tarfile, itertools
-p = __import__("glob").glob("/scratch/network/COVID3/data-network/*.tar.gz")[0]
+import tarfile, itertools, os
+p = __import__("glob").glob(os.environ["NET_DIR"] + "/*.tar.gz")[0]
 with tarfile.open(p, "r:gz") as t:
     for m in itertools.islice(t, 5):
         print(m.name, m.size)
