@@ -8,7 +8,9 @@
 #SBATCH --mail-type=fail,end
 #SBATCH --mail-user=yh6580@princeton.edu
 #SBATCH --output=logs/phaseA_%A_%a.out
-# NOTE: pass --array=0-$((N-1))%20 on the sbatch command line (N = number of tarballs).
+#SBATCH --array=0-5
+# --array=0-5 -> one task per tarball (6 tarballs). If the tarball count changes,
+# edit this single number (0-(N-1)); extra indices exit 0 via the bounds guard below.
 
 set -euo pipefail
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -34,15 +36,26 @@ if [ "${SLURM_ARRAY_TASK_ID}" -ge "$N" ]; then
 fi
 
 TB="${TARBALLS[$SLURM_ARRAY_TASK_ID]}"
-OUTFILE="$PARTS/$(basename "$TB").ids"
-echo "Processing $TB -> $OUTFILE"
+BASE="$(basename "$TB")"
+OUTFILE="$PARTS/$BASE.ids"
+EGOFILE="$PARTS/$BASE.ego"
+EGORAW="$PARTS/$BASE.ego.raw"
+echo "Processing $TB -> $OUTFILE (+ $EGOFILE)"
 
-# Extract -> strip CR + keep only all-digit lines (awk exits 0 even with no matches)
-# -> memory-bounded dedup. Write to .partial, then atomically rename on success.
-python extract_neighbors.py stream --tarball="$TB" \
+# Extract: followee IDs stream to stdout; ego IDs (from member filenames) go to
+# --ego_out. Followees are CR-stripped, digit-filtered (awk exits 0 even with no
+# matches), then memory-bounded deduped. Write to .partial, atomic rename on success.
+python extract_neighbors.py stream --tarball="$TB" --ego_out="$EGORAW" \
   | awk '{ sub(/\r$/, "") } /^[0-9]+$/' \
   | LC_ALL=C sort -u -S 50% --parallel="$CPUS" -T "$SCRATCH_TMP" \
   > "$OUTFILE.partial"
 mv -f "$OUTFILE.partial" "$OUTFILE"
 
-echo "Done: $(wc -l < "$OUTFILE") unique IDs in $OUTFILE"
+# Dedup this tarball's ego IDs (the egos to be excluded in Phase B).
+awk '{ sub(/\r$/, "") } /^[0-9]+$/' "$EGORAW" \
+  | LC_ALL=C sort -u -S 50% --parallel="$CPUS" -T "$SCRATCH_TMP" \
+  > "$EGOFILE.partial"
+mv -f "$EGOFILE.partial" "$EGOFILE"
+rm -f "$EGORAW"
+
+echo "Done: $(wc -l < "$OUTFILE") followee IDs, $(wc -l < "$EGOFILE") ego IDs"
