@@ -16,7 +16,6 @@ conda activate opinion
 PARTS="${PARTS:-$SCRATCH/neighbor_extract/parts}"
 OUT="${OUT:-$SCRATCH/neighbor_extract/out}"
 SCRATCH_TMP="${SCRATCH_TMP:-$SCRATCH/neighbor_extract/tmp}"
-EGO_FILE="${EGO_FILE:?set EGO_FILE to the ego-ID file (one numeric ID per line)}"
 CPUS="${SLURM_CPUS_PER_TASK:-4}"
 SHARD_SIZE="${SHARD_SIZE:-1000000}"
 mkdir -p "$OUT" "$SCRATCH_TMP" logs
@@ -26,13 +25,13 @@ echo "Merging $NPARTS sorted part files..."
 # Streaming k-way merge of already-sorted parts -> global unique neighbor set.
 LC_ALL=C sort -m -u "$PARTS"/*.ids > "$OUT/neighbors_unique.txt"
 
-echo "Normalizing + sorting ego file..."
-awk '{ sub(/\r$/, "") } /^[0-9]+$/' "$EGO_FILE" \
-  | LC_ALL=C sort -u -S 50% --parallel="$CPUS" -T "$SCRATCH_TMP" \
-  > "$OUT/ego_sorted.txt"
+# Ego IDs to exclude are derived from the tarball member filenames in Phase A
+# (each {user_id}-following.csv belongs to an ego). Merge the per-tarball .ego parts.
+echo "Merging ego IDs (from filenames)..."
+LC_ALL=C sort -m -u "$PARTS"/*.ego > "$OUT/ego_unique.txt"
 
 echo "Subtracting egos (neighbors - egos)..."
-LC_ALL=C comm -23 "$OUT/neighbors_unique.txt" "$OUT/ego_sorted.txt" \
+LC_ALL=C comm -23 "$OUT/neighbors_unique.txt" "$OUT/ego_unique.txt" \
   > "$OUT/neighbors_final.txt"
 
 echo "Sharding into ${SHARD_SIZE}-line files..."
@@ -41,5 +40,5 @@ split -l "$SHARD_SIZE" -d -a 4 --additional-suffix=.txt \
   "$OUT/neighbors_final.txt" "$OUT/neighbors_part_"
 
 echo "=== Counts ==="
-wc -l "$OUT/neighbors_unique.txt" "$OUT/ego_sorted.txt" "$OUT/neighbors_final.txt"
+wc -l "$OUT/neighbors_unique.txt" "$OUT/ego_unique.txt" "$OUT/neighbors_final.txt"
 echo "Shards: $(ls -1 "$OUT"/neighbors_part_*.txt | wc -l)"

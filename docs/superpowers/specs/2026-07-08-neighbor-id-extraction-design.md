@@ -1,7 +1,19 @@
 # Neighbor-ID Extraction Pipeline — Design
 
 **Date:** 2026-07-08
-**Status:** Approved design, pending implementation plan
+**Status:** Implemented. See revision note below.
+
+> **Revision (2026-07-08, post-implementation):** The ego-subtraction no longer uses a
+> separate external ego-ID file on Princeton. Because every `{user_id}-following.csv`
+> member belongs to an ego, the ego IDs to exclude are derived from the **member
+> filenames** while streaming: `extract_neighbors.py` takes `--ego_out=PATH` and writes
+> each ego's `{user_id}` (one per member, ~0.4M total, streamed to a side file, never
+> accumulated). Phase A produces a `.ego` part alongside each `.ids` part; Phase B merges
+> the `.ego` parts and `comm -23` subtracts them — no `EGO_FILE` needed. The scripts are
+> also self-contained (`NET_DIR`/paths and `#SBATCH --array=0-5` baked in) so they run via
+> a bare `sbatch` with no exports. Any further exclusion against the crawl-completed ego
+> list happens later on the crawl server. Sections below that reference a separate ego
+> file / `EGO_FILE` / `ego_sorted.txt` are superseded by this note.
 
 ## Goal
 

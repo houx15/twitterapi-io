@@ -1,6 +1,11 @@
 """Stream followee IDs out of Twitter following-network tar.gz archives.
 
 Emits one numeric followee ID per line to stdout (block-speed, memory-friendly).
+Optionally (--ego_out) also emits each ego user's own ID — parsed from the
+`{user_id}-following.csv` member name — to a side file, so egos can be excluded
+downstream without a separate ego-ID file. Ego IDs are one-per-member (~0.4M
+total), streamed straight to the file, never accumulated in memory.
+
 Does NOT deduplicate — dedup / ego-subtract / shard happen downstream via coreutils
 (sort -u | sort -m -u | comm -23 | split). See
 docs/superpowers/specs/2026-07-08-neighbor-id-extraction-design.md
@@ -29,8 +34,16 @@ def _setup_logging():
     )
 
 
+_SUFFIX = "-following.csv"
+
+
 def _is_following_csv(name: str) -> bool:
-    return name.split("/")[-1].endswith("-following.csv")
+    return name.split("/")[-1].endswith(_SUFFIX)
+
+
+def _ego_id_from_name(name: str) -> str:
+    """Ego user ID = the `{user_id}` prefix of a `{user_id}-following.csv` member."""
+    return name.split("/")[-1][: -len(_SUFFIX)]
 
 
 def _copy_member(file_obj, out) -> int:
@@ -53,8 +66,12 @@ def _copy_member(file_obj, out) -> int:
     return written
 
 
-def stream_tarball(tarball_path, out) -> dict:
+def stream_tarball(tarball_path, out, ego_out=None) -> dict:
     """Stream all *-following.csv member contents from one tar.gz into `out` (binary).
+
+    If `ego_out` is given (a binary stream), also write each member's ego user ID
+    (parsed from its filename) as its own line — recorded as soon as the member is
+    identified, so even an ego whose content is unreadable is still excluded.
 
     Sequential access via tar.next(); per-member try/except so one bad member never
     kills the job; periodic gc. Returns a stats dict.
@@ -71,6 +88,8 @@ def stream_tarball(tarball_path, out) -> dict:
                 if not (member.isfile() and _is_following_csv(member.name)):
                     member = tar.next()
                     continue
+                if ego_out is not None:
+                    ego_out.write(_ego_id_from_name(member.name).encode() + b"\n")
                 file_obj = tar.extractfile(member)
                 if file_obj is None:
                     skipped += 1
@@ -79,8 +98,6 @@ def stream_tarball(tarball_path, out) -> dict:
                 with file_obj:
                     total_bytes += _copy_member(file_obj, out)
                 streamed += 1
-                if streamed % GC_EVERY == 0:
-                    logger.info("%s: %d members, %d bytes", tarball_path, streamed, total_bytes)
             except Exception as e:  # one bad member must not abort a multi-hour job
                 # Close any partially-written line so a truncated member cannot
                 # fuse with the next member's first ID (e.g. "45" + "678" -> "45678").
@@ -93,10 +110,18 @@ def stream_tarball(tarball_path, out) -> dict:
     return stats
 
 
-def stream(tarball: str):
-    """CLI: stream one tarball's followee IDs to stdout."""
+def stream(tarball: str, ego_out: str = None):
+    """CLI: stream one tarball's followee IDs to stdout.
+
+    If --ego_out=PATH is given, also write the ego user IDs (from member filenames)
+    to PATH, one per line — used downstream to exclude egos without a separate file.
+    """
     _setup_logging()
-    stream_tarball(tarball, sys.stdout.buffer)
+    if ego_out:
+        with open(ego_out, "wb") as ego_f:
+            stream_tarball(tarball, sys.stdout.buffer, ego_out=ego_f)
+    else:
+        stream_tarball(tarball, sys.stdout.buffer)
     sys.stdout.buffer.flush()
 
 

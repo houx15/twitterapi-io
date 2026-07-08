@@ -91,3 +91,38 @@ def test_mid_member_read_error_does_not_fuse(tmp_path, monkeypatch):
     assert "45678" not in lines        # must NOT fuse across the failed member
     assert "678" in lines
     assert stats["skipped"] >= 1
+
+
+def test_ego_out_captures_filename_ids(tmp_path):
+    # Ego IDs are the {user_id} prefixes of *-following.csv members; followees go
+    # to stdout, egos go to the separate ego_out stream.
+    p = _make_tarball(tmp_path, [
+        ("111-following.csv", b"1\n2\n"),
+        ("somedir/222-following.csv", b"3\n"),
+        ("111-following.done", b""),
+        ("111-following.pickle4", b"garbage"),
+    ])
+    out = io.BytesIO()
+    ego = io.BytesIO()
+    en.stream_tarball(p, out, ego_out=ego)
+    followees = [ln for ln in out.getvalue().decode().split("\n") if ln != ""]
+    egos = [ln for ln in ego.getvalue().decode().split("\n") if ln != ""]
+    assert followees == ["1", "2", "3"]
+    assert sorted(egos) == ["111", "222"]
+
+
+def test_ego_id_recorded_even_if_content_unreadable(tmp_path, monkeypatch):
+    # An ego whose following.csv content fails mid-read must still be excluded:
+    # its ID comes from the filename, recorded before content is read.
+    p = _make_tarball(tmp_path, [("999-following.csv", b"whatever")])
+
+    def boom(file_obj, out):
+        raise OSError("simulated read failure")
+
+    monkeypatch.setattr(en, "_copy_member", boom)
+    out = io.BytesIO()
+    ego = io.BytesIO()
+    stats = en.stream_tarball(p, out, ego_out=ego)
+    egos = [ln for ln in ego.getvalue().decode().split("\n") if ln != ""]
+    assert egos == ["999"]
+    assert stats["skipped"] >= 1
