@@ -4,24 +4,24 @@ Extracts the deduplicated, ego-subtracted neighbor (followee) ID list from the
 Princeton following-network tarballs. See design:
 `docs/superpowers/specs/2026-07-08-neighbor-id-extraction-design.md`.
 
-Both scripts are **self-contained**: paths and the array range are baked in, so you
-just `sbatch` them — no `export`s, no command-line `--array`. Egos are excluded using
-the IDs derived from the tarball member filenames (`{user_id}-following.csv` → ego
-`{user_id}`), so **no external ego-ID file is needed** on Princeton.
+Everything runs in **one slurm job** — `slurm/extract_neighbors.slurm` — because the
+cluster limits concurrent jobs. It processes all tarballs serially, then merges,
+subtracts egos, and shards. It is **self-contained** (paths baked in, no `--array`) and
+**resumable**. Egos are excluded using the IDs derived from the tarball member filenames
+(`{user_id}-following.csv` → ego `{user_id}`), so **no external ego-ID file is needed**.
 
-Defaults baked into the scripts (edit inside the files only if your setup differs):
+Defaults baked into the script (edit inside the file only if your setup differs):
 - `NET_DIR=/scratch/network/COVID3/data-network`
 - `PARTS=$SCRATCH/neighbor_extract/parts`, `OUT=$SCRATCH/neighbor_extract/out`,
   `SCRATCH_TMP=$SCRATCH/neighbor_extract/tmp`
-- `SHARD_SIZE=1000000`
-- Phase A `#SBATCH --array=0-5` (6 tarballs). If the tarball count changes, edit that
-  one number in `slurm/extract_neighbors_phaseA.slurm`.
+- `SHARD_SIZE=1000000`, `SORT_BUF=32G` (per-sort buffer; only one sort runs at a time)
+- Resources: `--cpus-per-task=16 --mem=64G --time=24:00:00` — tune to your allocation.
 
 ## 0. One-time: sanity-check the data layout
 
 ```bash
 NET_DIR=/scratch/network/COVID3/data-network
-ls -1 "$NET_DIR"/*.tar.gz | wc -l          # should be 6 (= array size 0-5)
+ls -1 "$NET_DIR"/*.tar.gz | wc -l
 # Peek at member names in one archive (fast, no full unzip):
 NET_DIR="$NET_DIR" python - <<'PY'
 import tarfile, itertools, os
@@ -31,30 +31,24 @@ with tarfile.open(p, "r:gz") as t:
         print(m.name, m.size)
 PY
 ```
-Confirm names look like `.../{user_id}-following.csv`. If the count is not 6, update
-`--array=0-(count-1)` in `slurm/extract_neighbors_phaseA.slurm`.
+Confirm names look like `.../{user_id}-following.csv`.
 
-## 1. Submit Phase A, wait, then submit Phase B
+## 1. Submit the single job
 
-Run these from the repo root (so `python extract_neighbors.py` resolves):
+Run from the repo root (so `python extract_neighbors.py` resolves):
 
 ```bash
-sbatch slurm/extract_neighbors_phaseA.slurm      # array: one task per tarball
-# wait until all array tasks finish (squeue -u $USER), then:
-sbatch slurm/extract_neighbors_phaseB.slurm      # merge + ego-subtract + shard
+sbatch slurm/extract_neighbors.slurm
 ```
 
-Phase A writes, per tarball: `$PARTS/<tarball>.ids` (sorted-unique followee IDs) and
-`$PARTS/<tarball>.ego` (sorted-unique ego IDs from the filenames). Phase B merges all
-of them and subtracts.
+That's it — one job, one slot. Watch it with `squeue -u $USER` and
+`tail -f logs/extract_<jobid>.out`.
 
-Optional — chain them in one go so Phase B auto-starts on success:
-```bash
-A=$(sbatch --parsable slurm/extract_neighbors_phaseA.slurm)
-sbatch --dependency=afterok:$A slurm/extract_neighbors_phaseB.slurm
-```
+**If it hits the time limit** before finishing: just `sbatch` it again. Tarballs whose
+`.ids` and `.ego` parts already exist under `$PARTS` are skipped, so it resumes where it
+stopped, then runs the merge/subtract/shard.
 
-## 2. Dry-run one tarball first (recommended before the full array)
+## 2. Dry-run one tarball first (recommended)
 
 ```bash
 NET_DIR=/scratch/network/COVID3/data-network
@@ -64,8 +58,7 @@ python extract_neighbors.py stream --tarball="$TB" --ego_out=/tmp/egos.txt \
   | LC_ALL=C sort -u | head
 sort -u /tmp/egos.txt | head     # ego IDs parsed from this tarball's filenames
 ```
-(Streaming stats — streamed/skipped/bytes — are logged to stderr, printed once per
-task at the end.)
+(Streaming stats — streamed/skipped/bytes — are logged to stderr, once per tarball.)
 
 ## 3. Results
 
@@ -75,20 +68,20 @@ task at the end.)
 
 ## Troubleshooting
 
-- **`comm` complains input not sorted** — some `.ids`/`.ego` part predates a code change;
-  rerun the offending Phase A index. All sorts must be `LC_ALL=C`.
-- **Phase A array index fails** — rerun just that index:
-  `sbatch --array=<idx> slurm/extract_neighbors_phaseA.slurm`. Only complete files get
-  their final `.ids`/`.ego` name (atomic `.partial` rename), so a killed task leaves no
-  half-written part.
-- **`sort -m` "too many open files"** — only a concern with hundreds of parts; with 6
-  tarballs (12 part files) it never triggers.
+- **Re-run from scratch:** delete `$PARTS/*.ids` and `$PARTS/*.ego` (and `$OUT`) before
+  resubmitting; otherwise existing parts are reused.
+- **`comm` complains input not sorted** — a stale part predates a code change; delete that
+  tarball's `.ids`/`.ego` and resubmit. All sorts must be `LC_ALL=C`.
+- **OOM during sort** — lower `SORT_BUF` (e.g. `SORT_BUF=16G sbatch ...`) or raise `--mem`.
+- **Too slow** — the tarballs are processed serially. If wall-clock matters more than job
+  slots, we can add bounded internal parallelism (several tarballs at once in the one job);
+  ask and we'll wire it up.
 
 ## Notes for later
 
-- **Further ego exclusion:** this removes egos identified by the tarball filenames. If
-  your crawl-completed ego list (on the crawling server) differs, do a second
+- **Further ego exclusion:** this removes egos identified by the tarball filenames. If your
+  crawl-completed ego list (on the crawling server) differs, do a second
   `comm -23 neighbors_final.txt <that_ego_list>` there before crawling.
-- **Step 2 — IDs → usernames:** the crawler queries `from:{username}` (a handle), but
-  these are numeric IDs. Resolve IDs to usernames (twitterapi.io batch user-info-by-ID)
-  or adapt the crawler before crawling.
+- **Step 2 — IDs → usernames:** the crawler queries `from:{username}` (a handle), but these
+  are numeric IDs. Resolve IDs to usernames (twitterapi.io batch user-info-by-ID) or adapt
+  the crawler before crawling.

@@ -14,6 +14,14 @@
 > a bare `sbatch` with no exports. Any further exclusion against the crawl-completed ego
 > list happens later on the crawl server. Sections below that reference a separate ego
 > file / `EGO_FILE` / `ego_sorted.txt` are superseded by this note.
+>
+> **Revision 2 (2026-07-12):** The cluster limits concurrent jobs, so the slurm-array
+> Phase A / Phase B split (`extract_neighbors_phaseA.slurm` + `..._phaseB.slurm`) was
+> replaced by a **single job**, `slurm/extract_neighbors.slurm`, that processes all
+> tarballs serially and then merges/subtracts/shards — one `sbatch`, one slot. It is
+> **resumable**: re-submitting skips tarballs whose `.ids`/`.ego` parts already exist
+> (atomic `.partial`→`mv`), so a time-limit kill just needs a resubmit. Sections below
+> describing a slurm array or two-phase submission are superseded by this note.
 
 ## Goal
 
