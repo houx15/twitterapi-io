@@ -21,13 +21,15 @@
 # Just run:  sbatch slurm/extract_neighbors.slurm   (no exports, no --array)
 
 set -euo pipefail
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate opinion
+module load anaconda3/2023.3
+conda activate llm
 
 NET_DIR="${NET_DIR:-/scratch/network/COVID3/data-network}"
-PARTS="${PARTS:-$SCRATCH/neighbor_extract/parts}"
-OUT="${OUT:-$SCRATCH/neighbor_extract/out}"
-SCRATCH_TMP="${SCRATCH_TMP:-$SCRATCH/neighbor_extract/tmp}"
+# All outputs live under a per-user project folder (created by mkdir -p below).
+PROJECT_DIR="${PROJECT_DIR:-/scratch/network/yh6580/twitterapi-io}"
+PARTS="${PARTS:-$PROJECT_DIR/neighbor_extract/parts}"
+OUT="${OUT:-$PROJECT_DIR/neighbor_extract/out}"
+SCRATCH_TMP="${SCRATCH_TMP:-$PROJECT_DIR/neighbor_extract/tmp}"
 CPUS="${SLURM_CPUS_PER_TASK:-4}"
 SHARD_SIZE="${SHARD_SIZE:-1000000}"
 # Absolute sort buffer (only ONE sort runs at a time, so this is safe well under --mem).
