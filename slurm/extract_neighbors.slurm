@@ -20,8 +20,15 @@
 #
 # Just run:  sbatch slurm/extract_neighbors.slurm   (no exports, no --array)
 
+# Activate conda BEFORE strict mode: `conda activate` dereferences $PS1, which is
+# unbound in a batch shell and would trip `set -u` ("PS1: unbound variable").
 module load anaconda3/2023.3
 conda activate llm
+
+# Strict mode for the actual pipeline. pipefail is essential here: it makes a
+# `python | awk | sort` pipe fail if the extractor dies mid-stream, so `set -e`
+# aborts before the atomic mv promotes a truncated .ids part.
+set -euo pipefail
 
 NET_DIR="${NET_DIR:-/scratch/network/COVID3/data-network}"
 # All outputs live under a per-user project folder (created by mkdir -p below).
