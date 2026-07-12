@@ -20,7 +20,6 @@
 #
 # Just run:  sbatch slurm/extract_neighbors.slurm   (no exports, no --array)
 
-set -euo pipefail
 module load anaconda3/2023.3
 conda activate llm
 
