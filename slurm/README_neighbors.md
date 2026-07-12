@@ -11,9 +11,12 @@ subtracts egos, and shards. It is **self-contained** (paths baked in, no `--arra
 (`{user_id}-following.csv` → ego `{user_id}`), so **no external ego-ID file is needed**.
 
 Defaults baked into the script (edit inside the file only if your setup differs):
+- Env: `module load anaconda3/2023.3` + `conda activate llm`
 - `NET_DIR=/scratch/network/COVID3/data-network`
-- `PARTS=$SCRATCH/neighbor_extract/parts`, `OUT=$SCRATCH/neighbor_extract/out`,
-  `SCRATCH_TMP=$SCRATCH/neighbor_extract/tmp`
+- `PROJECT_DIR=/scratch/network/yh6580/twitterapi-io` (all outputs go here; created
+  automatically by `mkdir -p`), with
+  `PARTS=$PROJECT_DIR/neighbor_extract/parts`, `OUT=$PROJECT_DIR/neighbor_extract/out`,
+  `SCRATCH_TMP=$PROJECT_DIR/neighbor_extract/tmp`
 - `SHARD_SIZE=1000000`, `SORT_BUF=32G` (per-sort buffer; only one sort runs at a time)
 - Resources: `--cpus-per-task=16 --mem=64G --time=24:00:00` — tune to your allocation.
 
